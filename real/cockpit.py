@@ -296,7 +296,7 @@ def list_patterns():
 class Engine:
     """FSMエンジン。stateはUIへそのまま出す"""
 
-    def __init__(self, robot, is_sim):
+    def __init__(self, robot, is_sim, heartbeat_sec=3.0):
         self.robot = robot
         self.is_sim = is_sim
         self.lock = threading.Lock()
@@ -348,6 +348,8 @@ class Engine:
         self.busy = False                # ワーカーが実機RPC/方策読込を実行中
         self.busy_what = ""
         self._estop_pending = None       # estop_now が立てる。ループが後始末
+        self._last_beat = None              # UIハートビートの最終受信時刻(未受信=None)
+        self._heartbeat_sec = heartbeat_sec # 0で無効
         self._want_arm = False           # ワーカーの準備物をループが取り込む
         self._armed_bundle = None
         self._want_begin = None          # 開始するフェーズ番号
@@ -398,6 +400,10 @@ class Engine:
     def command(self, cmd, arg=None):
         with self.lock:
             self.cmd_q.append((cmd, arg))
+
+    def beat(self):
+        """UIからのハートビート。HTTPスレッドから直接呼ぶ(キューを経由しない)。"""
+        self._last_beat = time.time()
 
     def _pop(self):
         with self.lock:
@@ -452,6 +458,10 @@ class Engine:
                 why = self._safety()
                 if why:
                     self.estop_now(why)
+                    continue
+                if (self._heartbeat_sec > 0 and self._last_beat is not None
+                        and time.time() - self._last_beat > self._heartbeat_sec):
+                    self.estop_now("UIハートビート途絶")
             except Exception:                      # noqa: BLE001
                 pass
 
@@ -2244,6 +2254,8 @@ async function tick(){
  document.getElementById('place').style.display=d.is_sim?'inline-block':'none';
 }
 setInterval(tick,200);tick();
+setInterval(function(){cmd('beat')},1000);
+document.addEventListener('visibilitychange',function(){if(!document.hidden)cmd('beat')});
 document.addEventListener('keydown',e=>{
  if(e.key===' '&&e.target.tagName!=='INPUT'){e.preventDefault();cmd('estop')}});
 </script></body></html>"""
@@ -2284,6 +2296,8 @@ class Handler(BaseHTTPRequestHandler):
             why = ("操作者による緊急停止" if c == "estop"
                    else "操作者によるdamp")
             self.engine.estop_now(why)
+        elif c == "beat":
+            self.engine.beat()
         elif c == "select" and a and ":" in a:
             k, v = a.split(":", 1)
             self.engine.command("select", (k, v))
@@ -2308,6 +2322,10 @@ def main():
     ap.add_argument("--sim", action="store_true", help="MuJoCoモックで結合試験")
     ap.add_argument("--iface", default="", help="実機NIC名(例 enp46s0)")
     ap.add_argument("--port", type=int, default=8090)
+    ap.add_argument("--heartbeat-sec", type=float, default=3.0,
+                    help="UIハートビートの許容間隔[秒]。0で無効")
+    ap.add_argument("--host", default="0.0.0.0",
+                    help="HTTP待受アドレス(既定0.0.0.0=遠隔可。localhost縛りは127.0.0.1)")
     a = ap.parse_args()
     if a.sim:
         from sim_robot import SimRobot
@@ -2330,11 +2348,11 @@ def main():
     gc.collect()
     gc.freeze()
     gc.set_threshold(100_000, 50, 50)
-    eng = Engine(robot, a.sim)
+    eng = Engine(robot, a.sim, heartbeat_sec=a.heartbeat_sec)
     Handler.engine = eng
     Handler.patterns = list_patterns()
-    srv = ThreadingHTTPServer(("127.0.0.1", a.port), Handler)
-    print(f"コックピット: http://localhost:{a.port}")
+    srv = ThreadingHTTPServer((a.host, a.port), Handler)
+    print(f"コックピット: http://{a.host}:{a.port}")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
