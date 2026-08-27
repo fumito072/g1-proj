@@ -1,0 +1,6 @@
+# G1 機体側(Jetson / Ubuntu / ARM64)で cockpit.py を動かすための依存。
+# torch は NVIDIA の JetPack 用 index から別途入れる(setup_onboard.sh 参照)。
+numpy
+mujoco
+unitree_sdk2py
+cyclonedds==0.10.2
