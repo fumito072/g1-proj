@@ -1,0 +1,10 @@
+{
+ "tag": "sit_lean_r2",
+ "motion": "sit_lean15",
+ "obs_dim": 615,
+ "act_dim": 29,
+ "trained_steps": 120000,
+ "onnx": true,
+ "verify_max_err": 1.1920928955078125e-07,
+ "obs_layout": "real_env.RealMotionEnv._observe \u3092\u53c2\u7167(202\u6b21\u5143)"
+}

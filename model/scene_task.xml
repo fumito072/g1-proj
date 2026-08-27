@@ -1,0 +1,189 @@
+<mujoco model="g1 + operator seat">
+  <!-- 人の動画(段差を上る→180度回転→着座)をG1で再現するための課題シーン。
+       椅子は 2026-08-07 スキャンの操縦シートユニット(実寸・80kg・CoACD凸分割64個)。
+       ベース箱がそのまま「段差」になっている。 -->
+  <include file="g1_29dof.xml"/>
+  <compiler texturedir="meshes"/>
+  <statistic center="0 0 0.7" extent="2.4"/>
+  <option gravity="0 0 -9.81" integrator="implicitfast"/>
+  <visual>
+    <headlight diffuse="0.55 0.55 0.55" ambient="0.32 0.32 0.34" specular="0.1 0.1 0.1"/>
+    <rgba haze="0 0 0 1"/>
+    <global offwidth="1280" offheight="960"/>
+  </visual>
+
+  <default>
+
+    <default class="chair_col">
+      <geom group="3" rgba="0.8 0.3 0.3 0.4" density="485.8" friction="0.8 0.005 0.0001"/>
+    </default>
+    <default class="chair_vis">
+      <geom group="2" contype="0" conaffinity="0" density="0" material="chair_tex"/>
+    </default>
+  </default>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.07 0.075 0.09" rgb2="0 0 0" width="512" height="3072"/>
+    <texture type="2d" name="taskfloor" builtin="checker" mark="edge" rgb1="0.11 0.115 0.13"
+      rgb2="0.085 0.09 0.105" markrgb="0.2 0.21 0.24" width="300" height="300"/>
+    <material name="taskfloor" texture="taskfloor" texuniform="true" texrepeat="8 8" reflectance="0.15"/>
+
+    <mesh name="chair_visual" file="chair_visual.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col0" file="col_000.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col1" file="col_001.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col2" file="col_002.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col3" file="col_003.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col4" file="col_004.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col5" file="col_005.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col6" file="col_006.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col7" file="col_007.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col8" file="col_008.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col9" file="col_009.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col10" file="col_010.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col11" file="col_011.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col12" file="col_012.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col13" file="col_013.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col14" file="col_014.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col15" file="col_015.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col16" file="col_016.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col17" file="col_017.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col18" file="col_018.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col19" file="col_019.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col20" file="col_020.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col21" file="col_021.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col22" file="col_022.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col23" file="col_023.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col24" file="col_024.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col25" file="col_025.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col26" file="col_026.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col27" file="col_027.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col28" file="col_028.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col29" file="col_029.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col30" file="col_030.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col31" file="col_031.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col32" file="col_032.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col33" file="col_033.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col34" file="col_034.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col35" file="col_035.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col36" file="col_036.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col37" file="col_037.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col38" file="col_038.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col39" file="col_039.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col40" file="col_040.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col41" file="col_041.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col42" file="col_042.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col43" file="col_043.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col44" file="col_044.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col45" file="col_045.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col46" file="col_046.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col47" file="col_047.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col48" file="col_048.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col49" file="col_049.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col50" file="col_050.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col51" file="col_051.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col52" file="col_052.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col53" file="col_053.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col54" file="col_054.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col55" file="col_055.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col56" file="col_056.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col57" file="col_057.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col58" file="col_058.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col59" file="col_059.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col60" file="col_060.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col61" file="col_061.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col62" file="col_062.obj" scale="0.85 0.85 0.85"/>
+    <mesh name="col63" file="col_063.obj" scale="0.85 0.85 0.85"/>
+    <texture name="chair_diffuse" type="2d" file="chair_diffuse.png"/>
+    <material name="chair_tex" texture="chair_diffuse" specular="0.2" shininess="0.2"/>
+    <texture name="grid" type="2d" builtin="checker" rgb1=".25 .3 .35" rgb2=".15 .2 .25" width="512" height="512"/>
+    <material name="grid" texture="grid" texrepeat="10 10" reflectance="0.05"/>
+  </asset>
+
+  <worldbody>
+    <light pos="1.6 1.6 2.6" dir="-0.5 -0.5 -1" diffuse="0.55 0.55 0.6"/>
+    <light pos="-2 1 2.2" dir="0.6 -0.3 -0.8" diffuse="0.3 0.32 0.4"/>
+    <geom name="task_floor" size="0 0 0.05" type="plane" material="taskfloor"/>
+    <body name="chair" pos="0 0 0">
+          <geom name="chair_visual" type="mesh" mesh="chair_visual" class="chair_vis"/>
+      <!-- 段の踏み面。実メッシュの上面は y方向に38.5mm傾いており(実測:
+           y=-0.43で0.194m、y=-0.15で0.210m)、足裏の範囲だけでも10mm
+           変化する。そのため4つの接触球のうち2つしか接地せず、支持多角形が
+           線状になって必ず倒れていた。ここに平らな板を1枚敷いて踏み面にする。
+           高さは実メッシュ上面の最大(0.2097m)に合わせ、板が必ず上に出るようにする。 -->
+      <geom name="step_plate" type="box" pos="0.02 -0.29 0.2047"
+            size="0.36 0.20 0.005" class="chair_col"/>
+            <geom type="mesh" mesh="col0" class="chair_col"/>
+            <geom type="mesh" mesh="col1" class="chair_col"/>
+            <geom type="mesh" mesh="col2" class="chair_col"/>
+            <geom type="mesh" mesh="col3" class="chair_col"/>
+            <geom type="mesh" mesh="col4" class="chair_col"/>
+            <geom type="mesh" mesh="col5" class="chair_col"/>
+            <geom type="mesh" mesh="col6" class="chair_col"/>
+            <geom type="mesh" mesh="col7" class="chair_col"/>
+            <geom type="mesh" mesh="col8" class="chair_col"/>
+            <geom type="mesh" mesh="col9" class="chair_col"/>
+            <geom type="mesh" mesh="col10" class="chair_col"/>
+            <geom type="mesh" mesh="col11" class="chair_col"/>
+            <geom type="mesh" mesh="col12" class="chair_col"/>
+            <geom type="mesh" mesh="col13" class="chair_col"/>
+            <geom type="mesh" mesh="col14" class="chair_col"/>
+            <geom type="mesh" mesh="col15" class="chair_col"/>
+            <geom type="mesh" mesh="col16" class="chair_col"/>
+            <geom type="mesh" mesh="col17" class="chair_col"/>
+            <geom type="mesh" mesh="col18" class="chair_col"/>
+            <geom type="mesh" mesh="col19" class="chair_col"/>
+            <geom type="mesh" mesh="col20" class="chair_col"/>
+            <geom type="mesh" mesh="col21" class="chair_col"/>
+            <geom type="mesh" mesh="col22" class="chair_col"/>
+            <geom type="mesh" mesh="col23" class="chair_col"/>
+            <geom type="mesh" mesh="col24" class="chair_col"/>
+            <geom type="mesh" mesh="col25" class="chair_col"/>
+            <geom type="mesh" mesh="col26" class="chair_col"/>
+            <geom type="mesh" mesh="col27" class="chair_col"/>
+            <geom type="mesh" mesh="col28" class="chair_col"/>
+            <geom type="mesh" mesh="col29" class="chair_col"/>
+            <geom type="mesh" mesh="col30" class="chair_col"/>
+            <geom type="mesh" mesh="col31" class="chair_col"/>
+            <geom type="mesh" mesh="col32" class="chair_col"/>
+            <geom type="mesh" mesh="col33" class="chair_col"/>
+            <geom type="mesh" mesh="col34" class="chair_col"/>
+            <geom type="mesh" mesh="col35" class="chair_col"/>
+            <geom type="mesh" mesh="col36" class="chair_col"/>
+            <geom type="mesh" mesh="col37" class="chair_col"/>
+            <geom type="mesh" mesh="col38" class="chair_col"/>
+            <geom type="mesh" mesh="col39" class="chair_col"/>
+            <geom type="mesh" mesh="col40" class="chair_col"/>
+            <geom type="mesh" mesh="col41" class="chair_col"/>
+            <geom type="mesh" mesh="col42" class="chair_col"/>
+            <geom type="mesh" mesh="col43" class="chair_col"/>
+            <geom type="mesh" mesh="col44" class="chair_col"/>
+            <geom type="mesh" mesh="col45" class="chair_col"/>
+            <geom type="mesh" mesh="col46" class="chair_col"/>
+            <geom type="mesh" mesh="col47" class="chair_col"/>
+            <geom type="mesh" mesh="col48" class="chair_col"/>
+            <geom type="mesh" mesh="col49" class="chair_col"/>
+            <geom type="mesh" mesh="col50" class="chair_col"/>
+            <geom type="mesh" mesh="col51" class="chair_col"/>
+            <geom type="mesh" mesh="col52" class="chair_col"/>
+            <geom type="mesh" mesh="col53" class="chair_col"/>
+            <geom type="mesh" mesh="col54" class="chair_col"/>
+            <geom type="mesh" mesh="col55" class="chair_col"/>
+            <geom type="mesh" mesh="col56" class="chair_col"/>
+            <geom type="mesh" mesh="col57" class="chair_col"/>
+            <geom type="mesh" mesh="col58" class="chair_col"/>
+            <geom type="mesh" mesh="col59" class="chair_col"/>
+            <geom type="mesh" mesh="col60" class="chair_col"/>
+            <geom type="mesh" mesh="col61" class="chair_col"/>
+            <geom type="mesh" mesh="col62" class="chair_col"/>
+            <geom type="mesh" mesh="col63" class="chair_col"/>
+        </body>
+  </worldbody>
+
+  <keyframe>
+    <!-- 課題の開始姿勢: 段差のすぐ手前(y=-0.81。つま先が段差の5cm手前)に立ち、
+         椅子(+Y方向)を向く。
+         G1は前方が +X なので、Z軸まわりに +90度回して +Y を向かせる
+         (クォータニオン w=cos45°, z=sin45°) -->
+    <key name="start" qpos="0 -0.6885 0.794 0.70711 0 0 0.70711 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"/>
+  </keyframe>
+</mujoco>
