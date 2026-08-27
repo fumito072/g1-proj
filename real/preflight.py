@@ -453,7 +453,7 @@ def check_ui_wiring():
     used = set(re.findall(r"cmd\(\s*'([a-z_]+)'", page))
     m = re.search(r"CMD_ALLOW = \(([^)]*)\)", src, re.S)
     allow = set(re.findall(r'"([a-z_]+)"', m.group(1))) if m else set()
-    special = {"estop", "damp", "select"}          # do_POST で特別扱い
+    special = {"estop", "damp", "select", "beat"}  # do_POST で特別扱い
     handled = set(re.findall(r'cmd == "([a-z_]+)"', src))
     missing = sorted(used - allow - special)
     if missing:
