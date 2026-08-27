@@ -2323,6 +2323,8 @@ def main():
     ap.add_argument("--port", type=int, default=8090)
     ap.add_argument("--heartbeat-sec", type=float, default=3.0,
                     help="UIハートビートの許容間隔[秒]。0で無効")
+    ap.add_argument("--host", default="0.0.0.0",
+                    help="HTTP待受アドレス(既定0.0.0.0=遠隔可。localhost縛りは127.0.0.1)")
     a = ap.parse_args()
     if a.sim:
         from sim_robot import SimRobot
@@ -2348,8 +2350,8 @@ def main():
     eng = Engine(robot, a.sim, heartbeat_sec=a.heartbeat_sec)
     Handler.engine = eng
     Handler.patterns = list_patterns()
-    srv = ThreadingHTTPServer(("127.0.0.1", a.port), Handler)
-    print(f"コックピット: http://localhost:{a.port}")
+    srv = ThreadingHTTPServer((a.host, a.port), Handler)
+    print(f"コックピット: http://{a.host}:{a.port}")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
