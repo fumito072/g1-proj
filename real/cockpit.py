@@ -2255,6 +2255,7 @@ async function tick(){
 }
 setInterval(tick,200);tick();
 setInterval(function(){cmd('beat')},1000);
+document.addEventListener('visibilitychange',function(){if(!document.hidden)cmd('beat')});
 document.addEventListener('keydown',e=>{
  if(e.key===' '&&e.target.tagName!=='INPUT'){e.preventDefault();cmd('estop')}});
 </script></body></html>"""

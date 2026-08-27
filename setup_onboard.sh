@@ -16,8 +16,8 @@ pip install -r requirements_jetpack.txt
 # 入らなければ JetPack 5 を試す。
 TORCH_IDX6="https://developer.download.nvidia.com/compute/redist/jp/v60/pytorch/"
 TORCH_IDX5="https://developer.download.nvidia.com/compute/redist/jp/v50/pytorch/"
-pip install torch --extra-index-url "$TORCH_IDX6" \
-  || pip install torch --extra-index-url "$TORCH_IDX5"
+pip install torch --index-url "$TORCH_IDX6" \
+  || pip install torch --index-url "$TORCH_IDX5"
 
 # import 確認
 "$PY" - <<'PY'
