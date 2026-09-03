@@ -1,0 +1,23 @@
+{
+ "tag": "sit_up_ln20d_r2",
+ "motion": "sit_upright_lean20_slow",
+ "obs_dim": 615,
+ "act_dim": 29,
+ "trained_steps": 180000,
+ "onnx": true,
+ "verify_max_err": 1.1920928955078125e-07,
+ "base_tag": null,
+ "res_scale": null,
+ "obs_layout": "real_env.RealMotionEnv._observe(\u5c65\u6b743)= 615\u6b21\u5143",
+ "obs_extra": {
+  "contact": false,
+  "contact_dim": 0
+ },
+ "train_env": {
+  "G1_CONTACT_OBS": "0",
+  "G1_CHAIR_OBS": "0",
+  "G1_SIT_BEHIND": "1",
+  "G1_HANDOVER_DR": "0",
+  "G1_FRICTION_CALIB": "1"
+ }
+}
