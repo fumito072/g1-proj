@@ -27,7 +27,7 @@ import time
 
 import numpy as np
 
-HERE = pathlib.Path(__file__).parent
+HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent
 DEPLOY = ROOT / "deploy"
 
@@ -47,6 +47,25 @@ STILL_QD_RMS = 0.15
 STILL_SECONDS = 0.5
 
 
+class _Ref(dict):
+    """reference.npz を**丸ごとメモリへ読み出した**辞書。
+
+    ★2026-09-03。以前は np.load が返す NpzFile をそのまま持ち回っていたが、
+      NpzFile は遅延読み込みで、`ref["ref_xy_abs"]` のたびに開いたままの
+      zip を seek して解凍する。これを50Hzの制御ループから触ると
+        - zipの共有ファイルハンドルへの読みが交錯し、zipfile の zip爆弾
+          ガードが誤発火して `BadZipFile: Overlapped entries` で制御ループが
+          落ちる(機体で実際に発生し自動DAMPになった)
+        - 毎コマ解凍するぶん制御周期も食う
+      ので、読み込み時に全部materializeして zip は閉じる。
+      NpzFile と同じ使い勝手にするため `.files` も生やしてある。
+    """
+
+    @property
+    def files(self):
+        return list(self.keys())
+
+
 # ---------------------------------------------------------------- 方策
 class Policy:
     """deploy/<name>/ の TorchScript 方策と参照データ"""
@@ -56,7 +75,10 @@ class Policy:
         d = DEPLOY / name
         self.name = name
         self.net = torch.jit.load(str(d / "policy.pt")).eval()
-        z = np.load(d / "reference.npz")
+        # ★zipは読み切って閉じる(遅延読み込みのまま制御ループへ渡さない)。
+        #   理由は _Ref のコメントを参照。
+        with np.load(d / "reference.npz") as _z:
+            z = _Ref({k: _z[k] for k in _z.files})
         self.ref_q = z["ref_q"]                    # (n, 29)
         self.kp = z["kp"]
         self.kd = z["kd"]
@@ -64,6 +86,18 @@ class Policy:
         self.n = len(self.ref_q)
         self.meta = json.loads((d / "meta.json").read_text())
         self.ref = z                               # ref_quat/ref_xy_abs/ref_z等
+        # ★関節ごとの残差スケール(2026-09-02の配布から)。
+        #   target = ref_q + action * scale_v で、学習時と同じ幅にする。
+        #   ln20系は腕14関節が0.2、脚腰が0.7。**これを読まないと腕が
+        #   学習時の3.5倍の幅で動く**(配布元 README_必読.md)。
+        #   古い方策には無いので、その場合は従来どおり全関節 ACTION_SCALE。
+        if "action_scale_v" in z.files:
+            self.action_scale = np.asarray(z["action_scale_v"], dtype=float)
+            self.has_scale_v = True
+        else:
+            sc = float(z["action_scale"]) if "action_scale" in z.files else ACTION_SCALE
+            self.action_scale = np.full(29, sc, dtype=float)
+            self.has_scale_v = False
 
     def act(self, obs):
         import torch
@@ -338,7 +372,7 @@ def run_policy_phase(robot, obs_b, pol, logf, dry):
         obs = obs_b.build(pol, t, q, dq, quat, gyro)
         a = pol.act(obs)
         obs_b.last_cmd = a.copy()
-        target = pol.ref_q[min(t, pol.n - 1)] + a * ACTION_SCALE
+        target = pol.ref_q[min(t, pol.n - 1)] + a * pol.action_scale
         robot.set_target(target, pol.kp, pol.kd)
         ok, why = safety_ok(robot)
         if not ok:

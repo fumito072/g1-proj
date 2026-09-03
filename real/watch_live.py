@@ -20,7 +20,7 @@ import time
 
 import numpy as np
 
-ROOT = pathlib.Path(__file__).parent.parent
+ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "real"))
 
 from log_view import rated_torque              # noqa: E402

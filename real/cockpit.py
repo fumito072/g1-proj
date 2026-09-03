@@ -24,7 +24,7 @@ from urllib.parse import urlparse, parse_qs
 
 import numpy as np
 
-HERE = pathlib.Path(__file__).parent
+HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(ROOT))
@@ -237,12 +237,14 @@ ASSIST_LABEL = {"none": "補助なし(自立できていた)",
 # estop/damp/select だけは do_POST で特別扱いしている(即時実行・引数の分解)。
 # preflight 6c がこの対応を照合する。
 CMD_ALLOW = (
+    "armres", "armmode",
     "arm", "start", "next", "place_sim", "mode", "goto_start",
     "ground_check", "ramp", "blend", "memo", "newsession",
     "stand_user", "fsm_read", "user_run",
-    "mode_zero", "mode_damp", "mode_stand", "mode_walk",
+    "mode_zero", "mode_damp", "mode_stand", "mode_walk", "mode_sit",
+    "mode_seated",
     "custom", "run_task",
-    "assist", "yawalign", "stopframe",         # ← 2026-08-27に入れ忘れていた
+    "assist", "yawalign", "stopframe", "afterphase",         # ← 2026-08-27に入れ忘れていた
 )
 REC_SAVE_EVERY = 100              # 途中で落ちても失わないよう逐次保存
 
@@ -252,7 +254,50 @@ REC_SAVE_EVERY = 100              # 途中で落ちても失わないよう逐�
 # ★ここに無い方策は注記なしで出る。使用可否の判断は手順書が唯一の真実。
 PATTERN_NOTES = {
     # --- 着座(これまで使った全部を出す。使用可否は operator が決める)
-    "sit_up_dp4_r2":          "★新 deepと同じ参照を摩擦較正シムで18万step学習",
+    # 2026-08-28着。dp4 の**脚腰はビット単位で同一**で、腕にだけ軌道が入った
+    # (dp4は腕14関節が全395コマ0.000rad固定。ar1は振れ幅合計10.3rad)。
+    # 開始の肘も1.15radで実機の実測1.21radに近い。dp4は0.000で1.2radずれていた。
+    # 静止区間も53%→0%。シム実測: 座面荷重 228N→333N(機体35kg=350N)、
+    # 左股action +0.307→+0.212。ただし終端傾きは18.5→23.7度と参照(18.0)から離れた
+    # 2026-09-02 夕着。ln20の重みを親に、**参照の左右非対称を厳密にゼロ**へ
+    # 直して微調整した版(9/2の依頼1「参照のIKに左右対称拘束を」への回答)。
+    # 対称面を足の中点から実測(x=+0.034m)し、右脚=左脚の鏡像で強制。
+    # 検証: 股ピッチ/膝/足首Pの左右差、股ロール/ヨー/足首Rの左右和、腕の左右和、
+    #       腰ロール/ヨー — **全て 0.000000 rad**。前傾相(+20度)は保存。
+    # 配布元: 教師97%(プロジェクト最高)・蒸留の劣化ゼロ・ゲート6項目全合格。
+    #       シムのロール 平均-3.60度→-0.42度、左右の偏り 左28/右2 → 左18/右12。
+    # ★ただしシムのロールは実機の1/3しか再現しない。実機ではA/Bでしか判定できない。
+    # ★腕の終端静止は未対応。打ち切り247コマの運用はこの版でも必要(次版ln22で対応予定)。
+    # 2026-09-03着。ln22の重みに、実機30走行(9/2)のフレーム0×ロール±2.5度=90状態から
+    # 半分のエピソードを開始する「開始バンク」と、足ごと接触摩擦・脚ごとトルク上限の
+    # 左右非対称DRを加えて学習した版。ハンドオフ状態からの立て直しを直接学習。
+    # 配布元の測定(シム・実機ハンドオフ状態×各20試行):
+    #   ② 開始0.5秒の膝突き出し: ln22 完走11/20・膝逸脱16.0度 → ln23 完走20/20・13.1度(★改善)。
+    #      「開始直後に前へ倒れる」の原因だった転倒がシム上で消滅。
+    #   ① 左ロール: ln22 +0.37度 → ln23 -2.87度と★悪化(バンクに実機の左癖が焼き込まれた仮説)。
+    #      鏡像増強版は学習中。実機A/Bで左ロールがどう出るかは要実測。
+    # 終端静止を継承し「打ち切り不要(395全部)」。深さは参考値(シム134mm)。
+    "sit_up_ln23_r2":         "★★最新 実機開始分布+左右非対称DRで学習。膝突き出し改善(完走20/20)・左ロールは要実測。打ち切り不要",
+    "sit_up_ln21_r2":         "参照を厳密に左右対称化(全関節0.000000)。教師97%・ゲート6項目合格",
+    # 2026-09-02着の5系統。★配布ゲート6項目に合格したのは ln20 だけ。
+    # 8/28夕の指摘「背中から倒れるように座る」への対策として、参照の下降中に
+    # 上体を前傾させる相(ピーク+20度・開始1.12秒)を追加したもの。
+    # 重みは ar1 の教師と同一で参照を差し替えただけ(学習ステップ0)。
+    # 腕の残差は全14関節0.2で reference.npz の action_scale_v に同梱。
+    # ★左ロールは5系統どれも未解決(配布元 README_必読.md)。
+    "sit_up_ln20_r2":         "★A/Bの対照 前傾相を追加(+20度)。実機14/15完走・平均ロール-10.5度",
+    "sit_up_ln20d_r2":        "▲前傾+ゆっくり(下降1.4倍) 教師94%で最高だが深さ99mmで不合格。ゆっくり用",
+    "sit_up_ln20s_r2":        "▲ロール対策 効果ゼロ(シムがその領域に入らない)。深さ126mm",
+    "sit_up_ln20a_r2":        "▲腕の横方向だけ絞る 3項目不合格・深さ99mm",
+    "sit_up_ln20x_r2":        "▲全部入り 3項目不合格・深さ93mmで最も浅い",
+    # 2026-08-28着。参照側は明確に良くなっている(waist_pitchの22.5度段差を修正・
+    # 手首間隔0.184m一定・終端で腕が静止・下降1.4倍遅い)が、**配布ゲートに不合格**。
+    # 配布元の測定(deploy実体・各30試行): 成功 23/30(ar1は27/30)、着座の深さ12mm
+    # (ar1は54mm)、下降中の前傾25度(ar1は22度)。手の交差は17/20でほぼ改善せず。
+    # 「ar1を主とし比較用に交互で回すこと」と配布元が指示している
+    "sit_up_ar4_r2":          "▲ゲート不合格 参照は改善(段差修正/前へならえ)だが成功23/30・着座12mm。比較用",
+    "sit_up_ar1_r2":          "★主力 腕に軌道を追加(脚腰はdp4と同一)。成功27/30・着座54mm",
+    "sit_up_dp4_r2":          "deepと同じ参照を摩擦較正シムで18万step学習。8/27に◎18本",
     "sit_up_deep_r2":         "深座り(rc比+6.7cm) シム18/20。8/26実機で3本完走",
     "sit_up_rc_r2":           "アンカー 実機較正シムで再学習 95%",
     "sit_up_r2":              "原点アンカー(一番古い基準)",
@@ -293,8 +338,34 @@ def list_patterns():
     return out
 
 
+def default_pattern(task, fallback="(skip)"):
+    """その課題の既定の方策を決める。
+
+    ★PATTERN_NOTES で「★★最新」と印を付けた方策を既定にする。
+      新しい方策が来たら PATTERN_NOTES の印を移すだけで既定が追従するので、
+      ここのコードを書き換える必要がない(既定の更新漏れで古い方策のまま
+      実機を回してしまう事故を防ぐ)。
+    印が無ければ deploy へ最後に入ったもの(mtime最新)を既定にする。
+    """
+    names = list_patterns().get(task, [])
+    if not names:
+        return fallback
+    marked = [n for n in names
+              if PATTERN_NOTES.get(n, "").startswith("★★最新")]
+    if len(marked) == 1:
+        return marked[0]
+    if len(marked) > 1:                      # 印の付け替え忘れ。新しい方を採る
+        return max(marked, key=lambda n: (DEPLOY / n).stat().st_mtime)
+    return max(names, key=lambda n: (DEPLOY / n).stat().st_mtime)
+
+
 class Engine:
     """FSMエンジン。stateはUIへそのまま出す"""
+
+    # 横方向に効く腕関節(肩ロール・肩ヨー・手首ロール・手首ヨー)。
+    # 手の左右位置はここで決まる。前後の釣り合いの錘は肩ピッチ(15,22)と肘(18,25)
+    ARM_LAT = (16, 17, 19, 21, 23, 24, 26, 28)
+    ARM_ALL = tuple(range(15, 29))
 
     def __init__(self, robot, is_sim, heartbeat_sec=3.0):
         self.robot = robot
@@ -311,6 +382,28 @@ class Engine:
         # ヨー合わせ(2026-08-27)。実機でA/Bを取るために切れるようにしてある。
         # 既定はON。切ると2026-08-27 14:13以前と同じ挙動になる
         self.yaw_align = True
+        # 腕(15〜28)の残差スケール。1.0 = 従来どおり。
+        # ★方策の出力のうち腕だけを縮めて、参照の腕軌道に近づける。
+        #   2026-08-28 の実機8本で手が5本クロスした。参照(ar4)は手首間隔を
+        #   0.184m一定・左右対称に作り直してあるので、腕の残差を縮めれば
+        #   参照どおりの「前へならえ」に寄る。脚腰(0〜14)は触らない
+        #   — 触ると釣り合いの取り方そのものが変わってしまう。
+        # ★観測に入る last_cmd は縮めない生のまま渡す(学習時と同じ意味にする)。
+        #   縮めた値を渡すと方策は「自分は小さく出した」と誤認する。
+        # ★2026-09-02より、腕の残差は**方策側の reference.npz が指定**する
+        #   (ln20系は腕0.2)。ここは、その上にさらに掛ける現場調整の係数。
+        #   既定1.00 = 方策の指定どおり。以前は実機側だけで0.3にしていた
+        self.arm_res = 1.0
+        # 残差を縮める対象。"all"=腕14関節すべて / "lat"=横方向だけ。
+        # ★2026-08-28の実機12本で用量反応が出た:
+        #     残差1.0 → 手首間隔 -0.111m(クロス) / 終端傾き29.9度
+        #     残差0.5 → 0.107m                  / 8.2度
+        #     残差0.3 → 0.135m                  / 6.6度   参照は0.184m / 18.0度
+        #   手のクロスは直るが、**着座が浅くなる**。腕は釣り合いの錘でもあるため。
+        #   手の左右位置を決めるのは肩ロールと肩ヨー、
+        #   前後の釣り合いを担うのは肩ピッチと肘なので、**横方向だけ縮めれば
+        #   クロスを直したまま錘を残せる**はず。それが "lat"。
+        self.arm_res_mode = "lat"
         # 1回の走行が終わるたびに要点を1行ぶん積む。UIの[走行の統計]タブが
         # ここを読む。npzを開き直さずに現場でその場で比較できるようにするため。
         # 走らせながらnpzを解析すると制御ループを食う(2026-08-26に19Hzまで
@@ -327,8 +420,17 @@ class Engine:
         self.action_ramp_s = ACTION_RAMP_S
         self.ref_blend_s = REF_BLEND_S
         self._q0_blend = np.zeros(29)
+        # 着座は新しい方策が頻繁に来るので、PATTERN_NOTES の「★★最新」の印から
+        # 既定を自動で決める(2026-09-03。従来は sit_up_rc_r2 の固定だった)。
+        # climb/turn は方策が安定しているので実績のある既定を据え置く。
         self.sel = {"climb": "climb_slow_r2", "turn": "turn_wide_r2",
-                    "sit": "sit_up_rc_r2"}   # 実機較正シム再学習版を既定に(2026-08-23)
+                    "sit": default_pattern("sit", "sit_up_rc_r2")}
+        # 方策を走り終えたあと、自動で標準モードへ渡すか(2026-09-03)。
+        #   "seated"=着座(FSM3)へ渡す(既定) / "sit"=スクワット(FSM2) /
+        #   "damp"=ダンプ / "none"=渡さず方策のPDで姿勢維持(従来)
+        # 座り終えた姿勢の引き継ぎ先は **着座(FSM3)**。スクワット(FSM2)は
+        # 立位でしゃがむモードなので、座った状態から立ち上がろうとしうる。
+        self.after_phase = "seated"
         self.obs_b = None
         self.log_dir = None
         self.logs = []
@@ -341,6 +443,7 @@ class Engine:
         self.interp = None               # (q0, q_goal, kp, kd, i, steps)
         self._interp_then = "begin"      # 補間の後 "begin"=方策開始 / "hold"=保持
         self.hold_pol = None
+        self.hold_t = None
         self.stand = None
         # simは待機中の物理を凍結して置く(実機では操作者が支える)。
         # 凍結しないと、操作を始める前にモックが勝手に崩れる
@@ -503,6 +606,7 @@ class Engine:
             self._save_rec(final=False)
             self._push_run_stat(f"中断: {why}"[:60])
         self.hold_pol = None
+        self.hold_t = None
         self.interp = None
         self._want_begin = None
         gc.enable()
@@ -747,6 +851,21 @@ class Engine:
                                   single_task=task, begin=0, interp=None)
         self._want_arm = True
         self.log("★UserCtrl取得 → 待たずに方策を開始します(静的保持を挟まない)")
+
+    def _do_after_phase(self, name):
+        """方策の完了後に標準モードへ渡す(2026-09-03)。
+
+        ★椅子に座った姿勢から内蔵モードへ渡すことになる。FSM2(スクワット)は
+          立位でしゃがむモードなので、機体が椅子を蹴って立ち上がろうとする
+          可能性がある。必ずリモコンのE-STOPを握って見ていること。
+        渡す前に少しだけ待つ。方策の最終姿勢がPDで落ち着く前に内蔵制御へ
+        渡すと、目標の食い違いぶんだけ動き出しが大きくなる。
+        """
+        time.sleep(0.5)
+        if self.fsm != "HOLD":                     # その間に操作者が介入した
+            self.log("完了後の自動移行: 状態が変わったので中止しました")
+            return
+        self._do_standard(name)
 
     def _do_standard(self, name):
         self.armed = False
@@ -995,6 +1114,7 @@ class Engine:
             self.armed = True
             self.phase_i = -1
             self.hold_pol = None
+            self.hold_t = None
             self.fsm = "IDLE"
             if b["interp"] is not None:            # 開始姿勢へ補間してから
                 self.interp = b["interp"]
@@ -1037,6 +1157,22 @@ class Engine:
                          f"に設定" + ("(無効=従来どおり)" if self.action_ramp_s <= 0 else ""))
             except Exception:                      # noqa: BLE001
                 self.log(f"★ランプの値が不正: {arg}")
+        elif cmd == "armmode":
+            self.arm_res_mode = "lat" if arg == "lat" else "all"
+            self.log(f"腕の残差の対象: "
+                     + ("横方向のみ(肩ロール/ヨー・手首ロール/ヨー)。"
+                        "肩ピッチと肘は縮めないので釣り合いの錘は残る"
+                        if self.arm_res_mode == "lat" else "腕14関節すべて"))
+        elif cmd == "armres":
+            try:
+                self.arm_res = max(0.0, min(1.0, float(arg)))
+                self.log(f"腕の残差スケール: {self.arm_res:.2f}"
+                         + ("(従来どおり)" if self.arm_res >= 0.999 else
+                            f" — 腕は参照の{100 * (1 - self.arm_res):.0f}%%ぶん"
+                            f"方策の補正を受けなくなります"
+                            + ("(完全に参照どおり)" if self.arm_res <= 0.001 else "")))
+            except Exception:                      # noqa: BLE001
+                self.log(f"★腕の残差スケールが不正: {arg}")
         elif cmd == "stopframe":
             try:
                 self.stop_frame = max(0, int(float(arg)))
@@ -1045,6 +1181,16 @@ class Engine:
                             if self.stop_frame else "最後まで走ります(既定)"))
             except Exception:                      # noqa: BLE001
                 self.log(f"★打ち切りコマ数が不正: {arg}")
+        elif cmd == "afterphase":
+            if arg in ("none", "seated", "sit", "damp"):
+                self.after_phase = arg
+                self.log("方策の完了後: " + {
+                    "none": "何もしない(方策のPDで姿勢維持・従来どおり)",
+                    "seated": "★着座(FSM3)へ自動で渡します",
+                    "sit": "★スクワット(FSM2)へ自動で渡します",
+                    "damp": "ダンプへ自動で渡します"}[arg])
+            else:
+                self.log(f"★完了後の動作が不正: {arg}")
         elif cmd == "assist":
             self.assist = arg or "?"
             self.log(f"補助の記録: {ASSIST_LABEL.get(self.assist, self.assist)}")
@@ -1208,7 +1354,11 @@ class Engine:
             u = 1.0 if nb <= 0 else min(1.0, (self.t + 1) / nb)
             ref_eff = ((1.0 - u) * self._q0_blend
                        + u * pol.ref_q[min(self.t, pol.n - 1)])
-            target = ref_eff + a * ACTION_SCALE * w
+            # ★2026-09-02: 方策ごとの関節別スケール(pol.action_scale)を使う。
+            #   ln20系は腕0.2/脚腰0.7が参照npzに同梱されている。
+            #   UIの[腕の残差]は、それに**さらに掛ける**補正として働く
+            #   (既定1.00なら方策の指定どおり)。
+            target = ref_eff + self._scale_arm(a) * pol.action_scale * w
             if self.t == 0:
                 jm = np.abs(target[:15] - q[:15])
                 j = int(jm.argmax())
@@ -1232,8 +1382,10 @@ class Engine:
               and getattr(self, "hold_pol", None) is not None):
             # 待機中も直前フェーズの方策で最終コマを維持(バランスあり)
             pol = self.hold_pol
+            ht = int(getattr(self, "hold_t", pol.n - 1))
+            ht = max(0, min(ht, pol.n - 1))
             q, dq, quat, gyro, tau = self.robot.state()
-            obs = self.obs_b.build(pol, pol.n - 1, q, dq, quat, gyro)
+            obs = self.obs_b.build(pol, ht, q, dq, quat, gyro)
             a = pol.act(obs)
             if not (np.all(np.isfinite(obs)) and np.all(np.isfinite(a))):
                 self._nan_frames += 1
@@ -1243,7 +1395,7 @@ class Engine:
                 return
             self._nan_frames = 0
             self.obs_b.last_cmd = a.copy()
-            self._set_target(pol.ref_q[pol.n - 1] + a * ACTION_SCALE,
+            self._set_target(pol.ref_q[ht] + self._scale_arm(a) * pol.action_scale,
                              pol.kp, pol.kd)
         # simモックは論理時間で進める(壁時計非依存。実機は実時間)
         if self.is_sim and not getattr(self, "sim_frozen", False):
@@ -1277,9 +1429,13 @@ class Engine:
                       f"CPUが{pw.get('mhz', 0):.0f}MHzまでしか上がらず、"
                       "制御ループが19〜22Hzに落ちて必ず前に倒れます"
                       "(2026-08-26/27に計5本の転倒実績)")
-        elif pw.get("mhz") and pw["mhz"] < 2000:
-            warn.append(f"CPUの実クロックが低い(中央{pw['mhz']:.0f}MHz)"
-                        f" — ガバナ={pw.get('gov', '?')}")
+        elif pw.get("mhz") and pw["mhz"] < 2500:
+            # 最大コアが2.5GHzに届かない = 本当に上がっていない。
+            # ★ただしこれは「いま何も走っていない」ときも起こりうる。
+            #   走行中の実測は制御周期(dt_ms)で見ること
+            warn.append(f"CPUの最大コアが{pw['mhz']:.0f}MHzまでしか"
+                        f"上がっていない — ガバナ={pw.get('gov', '?')} / "
+                        f"power-profiles-daemon を疑う")
         h = self.robot.health_detail()
         lp = self._loop_stat()
         if self.busy:
@@ -1374,12 +1530,52 @@ class Engine:
                 "cpu*/cpufreq/scaling_cur_freq"))
             v = sorted(int(f.read_text().strip()) for f in fs)
             if v:
-                out["mhz"] = v[len(v) // 2] / 1000.0
+                # ★中央値を見てはいけない。16コアのうち動いているのは
+                #   制御ループの1コアだけで、残りは省電力で800MHzに落ちる。
+                #   2026-08-27〜28に、この中央値800MHzを2度「異常」と誤判定した。
+                #   意味があるのは**いちばん回っているコア**の周波数。
+                out["mhz"] = v[-1] / 1000.0
+                out["mhz_med"] = v[len(v) // 2] / 1000.0
             g = pathlib.Path("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
             out["gov"] = g.read_text().strip()
         except Exception:                          # noqa: BLE001
             pass
         _cache[0], _cache[1] = now, out
+        return out
+
+    def _pol_scale(self):
+        """選んでいる方策が指定する残差スケール。UIで見えないと、
+        腕が学習時の何倍で動いているのか現場で分からない。"""
+        try:
+            name = self.sel.get("sit", "(skip)")
+            if name == "(skip)":
+                return None
+            c = getattr(self, "_ps_cache", None)
+            if c is None:
+                c = self._ps_cache = {}
+            if name not in c:
+                # ★npzは開いたままにしない(遅延読み込みのzipハンドルが残ると
+                #   別スレッドの読みと交錯して BadZipFile を起こす。2026-09-03)
+                with np.load(DEPLOY / name / "reference.npz") as z:
+                    if "action_scale_v" in z.files:
+                        v = np.asarray(z["action_scale_v"], dtype=float)
+                        c[name] = dict(v=True, leg=round(float(v[:15].max()), 2),
+                                       arm=round(float(v[15:].max()), 2))
+                    else:
+                        sc = (float(z["action_scale"])
+                              if "action_scale" in z.files else 0.7)
+                        c[name] = dict(v=False, leg=round(sc, 2), arm=round(sc, 2))
+            return c[name]
+        except Exception:                          # noqa: BLE001
+            return None
+
+    def _scale_arm(self, a):
+        """方策出力の腕成分だけを縮めた配列を返す。脚腰(0〜14)は絶対に触らない。"""
+        if self.arm_res >= 0.999:
+            return a
+        idx = (self.ARM_LAT if self.arm_res_mode == "lat" else self.ARM_ALL)
+        out = a.copy()
+        out[list(idx)] *= self.arm_res
         return out
 
     def _pose_rows(self, q):
@@ -1486,6 +1682,7 @@ class Engine:
             return
         self.sim_frozen = False
         self.hold_pol = None
+        self.hold_t = None
         self._nan_frames = 0
         self._early_track = 0.0
         self._early_track_j = ""
@@ -1581,6 +1778,9 @@ class Engine:
             # 結果を説明できそうな候補なので、走行ごとに必ず残す
             "assist": self.assist,
             "stop_frame": int(self.stop_frame),
+            "after_phase": self.after_phase,
+            "arm_res": float(self.arm_res),
+            "arm_res_mode": self.arm_res_mode,
         }
         try:
             (self.log_dir / f"run{self.run_i:03d}_設定.json").write_text(
@@ -1694,6 +1894,10 @@ class Engine:
         self._phase_done = True
         self._save_rec(final=True)
         self._push_run_stat("完走" if self.t >= pol.n else f"{self.t}コマで打切")
+        if self.t < pol.n:
+            self.log(f"打ち切り {self.t}コマ({self.t / CONTROL_HZ:.2f}秒)。"
+                     f"以降はこのコマの姿勢で保持します"
+                     f"(最終コマではなく★打ち切ったコマ。2026-08-28修正)")
         gc.enable()
         # ★列を r[-2] で位置指定していたので、2026-08-26/27 に列を
         #   190→393へ増やしたとき blend_u を指すようになり、
@@ -1721,7 +1925,13 @@ class Engine:
                  f"  最大{tp.max():.0f}度(j{int(np.argmax(tp))})")
         # 待機中も方策を最終コマで動かし続ける(方策は終端の静止保持を
         # 学習済み。素のPD保持は数秒で釣り合いを失う。実測)
+        # ★2026-08-28 のバグ。打ち切り(stop_frame)で止めたときも
+        #   pol.n-1(=最終コマ)を保持していた。ar1 を245コマで切ると
+        #   保持の目標が ref_q[244] → ref_q[394] へ一瞬で飛び、
+        #   **腰ピッチが22.5度(0.393rad)ジャンプ**して不安定になった。
+        #   保持は「実際に走り終わったコマ」で行うこと。
         self.hold_pol = pol
+        self.hold_t = max(0, min(self.t, pol.n) - 1)
         if self.phase_i + 1 < len(self.phases):
             self.phase_i += 1
             if self.step_mode:
@@ -1733,6 +1943,14 @@ class Engine:
         else:
             self.fsm = "HOLD"
             self.log(f"{name} 完了。全フェーズ終了 — 方策で姿勢維持中")
+            # 完了後に標準モードへ自動で渡す(操作者が選んだときだけ)。
+            # ★50Hzループの中でRPCを呼ばないこと。_spawn でワーカーに出す。
+            if self.after_phase in ("seated", "sit", "damp"):
+                nm = {"seated": "着座(FSM3)", "sit": "スクワット(FSM2)",
+                      "damp": "ダンプ"}[self.after_phase]
+                self.log(f"完了後の自動移行: {nm} へ渡します")
+                self._spawn(f"完了後 {nm}",
+                            lambda n=self.after_phase: self._do_after_phase(n))
 
     def _rec(self, name, q, dq, quat, gyro, tau, obs, a, target):
         """1コマを REC_COLS の並びで平坦な行にして積む(2026-08-24形式)。
@@ -1804,6 +2022,10 @@ class Engine:
                 "yaw_align": bool(self.yaw_align),
                 "assist": self.assist,
                 "stop_frame": int(self.stop_frame),
+                "after_phase": self.after_phase,
+                "arm_res": float(self.arm_res),
+                "arm_res_mode": self.arm_res_mode,
+                "pol_scale": self._pol_scale(),
                 "run_stats": self.run_stats[-40:],
                 "ramp": float(self.action_ramp_s),
                 "blend": float(self.ref_blend_s),
@@ -1932,8 +2154,15 @@ table.st td{text-align:right;padding:3px 6px;border-top:1px solid var(--line);wh
    <button onclick="cmd('mode_zero')">ゼロトルク</button>
    <button onclick="cmd('mode_damp')">ダンプ</button>
    <button onclick="cmd('mode_stand')">立つ</button>
+   <button onclick="cmd('mode_walk')">ウォーキング</button>
+   <button onclick="cmd('mode_sit')">座る(スクワット)</button>
+   <button onclick="cmd('mode_seated')">着座</button>
    <button onclick="cmd('damp')">damp(方策側)</button>
   </div>
+  <div class="lbl">★「ウォーキング」は走行制御(FSM802)。押すと歩き出しうる。
+  歩行状態から方策へ引き継ぐ場合はこれで走行にしてから「制御権を取る」→方策を実行する。<br>
+  ★「座る(スクワット)」はUnitree標準のFSM2。立位のまましゃがみ込む。押すと実機が下方へ動く。<br>
+  ★「着座」はFSM3。方策で座り終えた姿勢を内蔵制御へ渡す先で、完了後の自動移行の既定でもある。</div>
  </div>
 
  <div class="sec"><div class="st">2. 制御権を取る</div>
@@ -1972,15 +2201,75 @@ table.st td{text-align:right;padding:3px 6px;border-top:1px solid var(--line);wh
    <button onclick="cmd('ground_check')">&#9878; 接地チェック</button>
    <button class="next" id="next" onclick="cmd('next')">&#9654; NEXT</button>
   </div>
+  <div class="row">腕の残差
+   <select id="sel_armres" onchange="cmd('armres',this.value)">
+    <option value="1.0">1.00 — 既定。方策の指定どおり</option>
+    <option value="0.9">0.90</option>
+    <option value="0.8">0.80</option>
+    <option value="0.7">0.70</option>
+    <option value="0.6">0.60</option>
+    <option value="0.5">0.50 — 半分</option>
+    <option value="0.4">0.40</option>
+    <option value="0.3">0.30 — 旧ar1での手のクロス対策値</option>
+    <option value="0.2">0.20</option>
+    <option value="0.1">0.10</option>
+    <option value="0.0">0.00 — 参照の腕軌道そのまま(方策の補正なし)</option>
+   </select>
+   <select id="sel_armmode" onchange="cmd('armmode',this.value)">
+    <option value="lat">★横方向のみ(肩ロール/ヨー・手首)</option>
+    <option value="all">腕14関節すべて</option>
+   </select></div>
+  <div class="lbl" id="polscale" style="margin-bottom:4px"></div>
+  <div class="lbl">方策の出力のうち<b>腕だけ</b>を<b>さらに</b>縮める。脚腰は触らない。
+   ★2026-09-02以降の方策は参照npzが関節別スケールを持つので、既定1.00でよい。<br>
+   <b>実機12本の用量反応:</b> 残差1.0→手首間隔-0.111m(クロス)/終端傾き29.9度、
+   0.5→0.107m/8.2度、0.3→0.135m/6.6度。参照は0.184m/18.0度。
+   <b>クロスは直るが着座が浅くなる</b>(腕は釣り合いの錘でもあるため)。<br>
+   ★<b>横方向のみ</b>なら、手の左右位置を決める肩ロール/ヨーだけを縮め、
+   前後の錘である肩ピッチと肘は残せる。
+   2026-08-28の実機8本で手が5本クロスした(62%)。原因は参照の手首間隔の余裕
+   (2〜10cm)より実機の腕の追従誤差(5〜10cm)が大きいこと。
+   ar4の参照は手首間隔0.184m一定・左右対称なので、腕の残差を縮めれば
+   「前へならえ」に寄る。<br>
+   ★観測に入る値は縮めない(学習時と同じ意味を保つ)ので、方策の判断自体は変わらない。
+   ★0.00でも腕は動く(参照の軌道どおりに動く)</div>
+  <div class="row">完了後
+   <select id="sel_after" onchange="cmd('afterphase',this.value)">
+    <option value="seated">★着座(FSM3)へ渡す — 既定</option>
+    <option value="sit">スクワット(FSM2)へ渡す</option>
+    <option value="damp">ダンプへ渡す</option>
+    <option value="none">何もしない — 方策のPDで姿勢維持(従来)</option>
+   </select></div>
+  <div class="lbl">方策を走り終えたあと、内蔵の標準モードへ自動で渡す。
+  0.5秒待ってから渡す(方策の最終姿勢が落ち着く前に渡すと動き出しが大きい)。<br>
+  <b>★着座(FSM3)が座り終えた姿勢の引き継ぎ先。スクワット(FSM2)は立位で
+  しゃがむモードなので、座った状態から立ち上がろうとしうる。</b><br>
+  「何もしない」だと方策のPDが最終姿勢を保持し続ける(モータが発熱するので
+  終わったら手動でダンプする)。<b>最初の数回はリモコンのE-STOPを握って見ていること。</b></div>
   <div class="row">打ち切り
    <select id="sel_stop" onchange="cmd('stopframe',this.value)">
-    <option value="0">最後まで(395コマ / 7.9秒)</option>
-    <option value="146">146コマ(2.92秒) — 背もたれへ反る前で止める</option>
+    <option value="0">最後まで(方策ごとの全長)</option>
+    <option value="285">★285コマ(5.70秒) — ln20d / ln20x 用(全433コマ)</option>
+    <option value="247">★247コマ(4.94秒) — ln21 / ln20 / ln20s / ln20a / ar1 用(全395コマ)</option>
+    <option value="146">146コマ(2.92秒) — dp4用。背もたれへ反る前で止める</option>
     <option value="115">115コマ(2.30秒) — 座り終わった直後</option>
    </select></div>
   <div class="lbl">参照npzは書き換えず<b>走行を途中で止めるだけ</b>。
-  観測には正規化時刻と先読みが入るので、配列を切ると別物になる。
-  146〜242コマが「背もたれへ18度反る」区間(2026-08-27解析)</div>
+  観測には正規化時刻と先読みが入るので、配列を切ると別物になる。<br>
+  <b>★ln20系5種と ln21 はすべて静止区間0%で、脚腰が止まった後も腕だけが最後まで動き続ける</b>
+  (ar1と同じ)。座った直後に手足が動くのはこれが原因。
+  ln21も配布元が「腕の終端静止は未対応。次版ln22で対応予定」と明記している。<br>
+  <table style="font-size:10px;border-collapse:collapse;margin:5px 0">
+  <tr><td style="padding:1px 8px 1px 0"><b>ln21</b> / ln20 / ln20s / ln20a</td><td style="padding:1px 8px">全395コマ</td>
+      <td style="padding:1px 8px">脚腰は245コマ(4.90秒)で停止</td><td><b>→ 247で打ち切り</b></td></tr>
+  <tr><td style="padding:1px 8px 1px 0">ln20d / ln20x</td><td style="padding:1px 8px">全433コマ</td>
+      <td style="padding:1px 8px">脚腰は283コマ(5.66秒)で停止</td><td><b>→ 285で打ち切り</b></td></tr>
+  </table>
+  体幹の傾きは打ち切り点の手前(241 / 279コマ)で終端値-18度に到達済み。
+  <b>脚腰の軌道は全部走り切ったうえで、その先の腕の動きだけが消える。</b><br>
+  ar4は282コマ以降が全関節静止なので打ち切り不要。
+  <b>ln23は終端静止を継承しているので打ち切り不要(「最後まで」を選ぶ)。</b><br>
+  dp4: 146〜242コマが「背もたれへ18度反る」区間(2026-08-27解析)</div>
  </div>
 
  <details><summary>詳細設定 (参照ブレンド / ランプ / ヨー合わせ / 進行)</summary>
@@ -2177,8 +2466,15 @@ function fill(id,arr,cur,skip,notes){const e=document.getElementById(id);
  e.innerHTML=items.map(x=>{const n=(notes||{})[x];
   return `<option value="${x}" ${x===cur?'selected':''}>${x}${n?'  —  '+n:''}</option>`
  }).join('')}
+let META=null;
+async function loadMeta(){
+ try{const m=await(await fetch('/state?meta=1')).json();
+     META={patterns:m.patterns,notes:m.notes,warn:m.warn};}catch(e){}
+}
 async function tick(){
+ if(!META){await loadMeta();if(!META)return}
  let d;try{d=await(await fetch('/state')).json()}catch(e){return}
+ d.patterns=META.patterns;d.notes=META.notes;d.warn=META.warn;
  S=d;
  document.getElementById('mode').textContent=d.is_sim?'[SIMモック]':'[実機]';
  const f=document.getElementById('fsm');f.textContent=d.fsm;
@@ -2197,11 +2493,21 @@ async function tick(){
  document.getElementById('sel_yaw').value=d.yaw_align?'on':'off';
  document.getElementById('sel_assist').value=d.assist||'?';
  document.getElementById('sel_stop').value=String(d.stop_frame||0);
+ document.getElementById('sel_after').value=d.after_phase||'none';
+ document.getElementById('sel_armres').value=(d.arm_res===undefined?1:d.arm_res).toFixed(1);
+ document.getElementById('sel_armmode').value=d.arm_res_mode||'lat';
+ const ps=document.getElementById('polscale');
+ if(ps){const p=d.pol_scale;
+  ps.innerHTML=!p?'':('方策が指定する残差スケール: 脚腰 <b>'+p.leg.toFixed(2)+
+   '</b> / 腕 <b style="color:'+(p.v?'var(--ok)':'var(--warn)')+'">'+p.arm.toFixed(2)+'</b>'+
+   (p.v?'（参照npzに同梱）':'<b style="color:var(--warn)">（関節別指定なし＝旧方策）</b>'));}
  drawPose(d.pose,d); drawCrouch(d); drawStats(d.run_stats);
  const pw=document.getElementById('pwr'), p=d.power||{}, ac=(p.ac===0);
  pw.innerHTML='電源 <b style="color:'+(ac?'var(--bad)':'var(--ok)')+'">'+
   (ac?'★AC未接続':'AC接続')+'</b>'+
-  (p.mhz?('　CPU <b style="color:'+(p.mhz<2000?'var(--warn)':'var(--ok)')+'">'+p.mhz.toFixed(0)+'MHz</b>'):'')+
+  (p.mhz?('　CPU最大 <b style="color:'+(p.mhz<2500?'var(--warn)':'var(--ok)')+'">'+
+    p.mhz.toFixed(0)+'MHz</b>'+(p.mhz_med?('<span style="color:var(--t2)"> (中央'+
+    p.mhz_med.toFixed(0)+'MHz — 暇なコアは800まで落ちるので正常)</span>'):'')):'')+
   (p.gov?('　'+p.gov):'')+
   '<br>受信/送信 <b style="color:'+(d.healthy?'var(--ok)':'var(--bad)')+'">'+
   ((h.state_age_ms<200?'受信OK':'受信途絶')+' / '+(h.send_hz_ok?'送信OK':'送信停止'))+'</b>'+
@@ -2264,6 +2570,15 @@ document.addEventListener('keydown',e=>{
 class Handler(BaseHTTPRequestHandler):
     engine = None
     patterns = None
+    # ★2026-09-03 HTTP/1.1(Keep-Alive)にする。
+    #   既定の HTTP/1.0 はリクエストごとにTCP接続を張り直す。UIは
+    #   /state を5回/秒 + beat を1回/秒 = 6接続/秒 も張っていた。
+    #   無線(実測ロス10%)ではSYNが落ちるたびに**再送で1秒以上**止まり、
+    #   これが「UIが重い」の正体だった。Keep-Aliveなら接続を使い回すので
+    #   ハンドシェイクごとの取りこぼしが消える。
+    #   _send は必ず Content-Length を送っているので、そのまま切り替えて安全。
+    protocol_version = "HTTP/1.1"
+    timeout = 15                      # 放置された接続を掴んだままにしない
 
     def _send(self, body, ctype):
         self.send_response(200)
@@ -2275,11 +2590,16 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         p = urlparse(self.path).path
         if p == "/state":
-            full = "full" in parse_qs(urlparse(self.path).query)
+            qs = parse_qs(urlparse(self.path).query)
+            full = "full" in qs
             d = self.engine.snapshot(full=full)
-            d["patterns"] = self.patterns
-            d["notes"] = PATTERN_NOTES
-            d["warn"] = PATTERN_WARN
+            # ★2026-09-03 patterns/notes/warn は起動中まったく変わらないのに
+            #   毎tick(5回/秒)送っていた=2.6KB×5/秒の無駄。無線では効く。
+            #   クライアントは起動時に ?meta=1 で一度だけ取って持っておく。
+            if "meta" in qs:
+                d["patterns"] = self.patterns
+                d["notes"] = PATTERN_NOTES
+                d["warn"] = PATTERN_WARN
             self._send(json.dumps(d).encode(), "application/json")
         elif p == "/frame.jpg" and self.engine.is_sim:
             self._send(self.engine.robot.render_jpeg(), "image/jpeg")
@@ -2322,8 +2642,18 @@ def main():
     ap.add_argument("--sim", action="store_true", help="MuJoCoモックで結合試験")
     ap.add_argument("--iface", default="", help="実機NIC名(例 enp46s0)")
     ap.add_argument("--port", type=int, default=8090)
-    ap.add_argument("--heartbeat-sec", type=float, default=3.0,
-                    help="UIハートビートの許容間隔[秒]。0で無効")
+    # ★2026-09-03 既定を3.0→8.0へ。UIは1秒ごとにビートを打つので3.0は
+    #   「3回連続で取りこぼしたら止める」の意味だった。有線LAN前提の値で、
+    #   無線(実測: ロス最大83%・RTT 13〜1406ms)では瞬断のたびに誤ってDAMPに
+    #   入る。オンボード運用では制御は機体内で完結していて通信断でも止まらず、
+    #   途絶して困るのは「UIから介入できないこと」だけ。本当の安全装置は
+    #   リモコンのE-STOP(ハードウェア・ネットワーク非依存)なので、
+    #   無線の瞬断を吸収しつつ本当にUIを失えば8秒で止まる値にする。
+    #   ★ブラウザは前面に置くこと。背面タブだと setInterval が抑制され
+    #     (Chromeは最小1回/分)、この値をいくら延ばしても途絶する。
+    ap.add_argument("--heartbeat-sec", type=float, default=8.0,
+                    help="UIハートビートの許容間隔[秒]。0で無効"
+                         "(既定8.0=無線の瞬断を吸収する値)")
     ap.add_argument("--host", default="0.0.0.0",
                     help="HTTP待受アドレス(既定0.0.0.0=遠隔可。localhost縛りは127.0.0.1)")
     a = ap.parse_args()
@@ -2351,6 +2681,9 @@ def main():
     eng = Engine(robot, a.sim, heartbeat_sec=a.heartbeat_sec)
     Handler.engine = eng
     Handler.patterns = list_patterns()
+    # Keep-Aliveだとブラウザが複数の接続を張ったまま保つので待ち行列を広げる
+    ThreadingHTTPServer.request_queue_size = 32
+    ThreadingHTTPServer.daemon_threads = True
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
     print(f"コックピット: http://{a.host}:{a.port}")
     try:

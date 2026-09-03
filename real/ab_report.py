@@ -23,7 +23,7 @@ import time
 
 import numpy as np
 
-ROOT = pathlib.Path(__file__).parent.parent
+ROOT = pathlib.Path(__file__).resolve().parent.parent
 LOGS = ROOT / "logs" / "real"
 DEPLOY = ROOT / "deploy"
 FSM_RUNNING, FSM_DAMP = 3, 5

@@ -14,7 +14,7 @@ import numpy as np
 
 from real_robot import GUARD_RANGE_MARGIN, GUARD_STEP_MAX  # ガードは1箇所で決める
 
-ROOT = pathlib.Path(__file__).parent.parent
+ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
 class SimRobot:
@@ -199,9 +199,10 @@ class SimRobot:
             self.set_target(np.zeros(29), np.zeros(29), np.zeros(29))
         elif name == "damp":
             self.set_damp()
-        elif name in ("stand", "walk"):
+        elif name in ("stand", "walk", "sit", "seated"):
             # 標準コントローラのバランス制御はsimに無い。
-            # standは現姿勢PD保持で近似(数秒で釣り合いを失う点に注意)
+            # stand/walk/sit(スクワット)/seated(着座)は現姿勢PD保持で近似
+            # (数秒で釣り合いを失う点に注意。simでは姿勢遷移そのものは起きない)
             q, _, _, _, _ = self.state()
             kp = np.full(29, 100.0)
             kd = np.full(29, 3.0)

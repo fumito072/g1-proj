@@ -36,7 +36,7 @@ import time
 
 import numpy as np
 
-HERE = pathlib.Path(__file__).parent
+HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 

@@ -20,7 +20,7 @@ import sys
 
 import numpy as np
 
-ROOT = pathlib.Path(__file__).parent.parent
+ROOT = pathlib.Path(__file__).resolve().parent.parent
 LOGS = ROOT / "logs" / "real"
 FSM_NAME = {0: "IDLE", 1: "MOVING", 2: "WAIT", 3: "RUNNING", 4: "HOLD", 5: "DAMP"}
 # 連続定格。トルク余裕の判定に使う(SIM_SUMMARY.md 1章)

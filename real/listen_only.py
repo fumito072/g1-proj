@@ -22,7 +22,7 @@ import time
 
 import numpy as np
 
-ROOT = pathlib.Path(__file__).parent.parent
+ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
 def quat_to_mat(q):

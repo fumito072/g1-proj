@@ -56,6 +56,17 @@ GUARD_STEP_MAX = 1.5
 # NaN/Infをこの回数連続で受けたら、呼び出し側へ「異常」を返す
 GUARD_NAN_TRIP = 3
 
+# SwitchToUserCtrl(7110) のあと FSM=1000 を確認するまで待つ秒数。
+# ★2026-09-03 オンボード実行(機体上でコックピットを走らせる)で 2.0秒では
+#   足りず、切替に失敗したと誤判定していた。機体上では切替の最中に
+#   コックピット(DDS受信 recvMC が1コアの7割 + user_lowcmdの500Hz送信)と
+#   制御サービスが同じJetsonのCPUを奪い合い、GetFsmId が None(RPC不達)を
+#   返し続ける。PC制御のときは500Hz送信がPC側にあり、機体は受信だけで
+#   済んでいたのでこの競合が出なかった。
+#   この窓の間に出しているのは user_lowcmd のストリームだけで、UserCtrlに
+#   入るまでロボットは無視するので、延ばしても機体は動かない。
+USER_CTRL_CONFIRM_S = 6.0
+
 
 def _rpc(label, fn, *args, timeout=2.5):
     """SDKのRPCを**必ず有限時間で**打ち切って呼ぶ。
@@ -236,8 +247,20 @@ class RealRobot:
         # 方策を使う直前に ensure_custom() でシームレスに引き継ぐ。
 
         # --- 購読
+        #   ★2026-09-03 ハンドラを付けずポーリングで読む。
+        #     SDKは handler を渡すと DataReader に Listener を付ける。すると
+        #     cyclonedds の受信スレッド(recvMC)が **1043回/秒 Python に入って
+        #     GILを握り**、同じプロセスの50Hz制御ループを餓死させる。機体
+        #     (Jetson ARM)ではこれで制御周期が71ms(14Hz)まで落ち、方策が
+        #     自動DAMPされた。PC(x86)は単スレッド性能が高く表面化しなかった。
+        #     handler=None なら Listener が付かず受信スレッドはPythonに入らない。
+        #     読み取りは _state_poll_loop が約180Hzで行う(下記)。
         self._sub = ChannelSubscriber("rt/lowstate", LowState_)
-        self._sub.Init(self._on_state, 10)
+        self._sub.Init(None, 0)
+        self._poll_stop = False
+        self._th_poll = threading.Thread(target=self._state_poll_loop,
+                                         name="lowstate_poll", daemon=True)
+        self._th_poll.start()
         # --- 送信
         self._pub = ChannelPublisher("rt/lowcmd", LowCmd_)
         self._pub.Init()
@@ -426,11 +449,15 @@ class RealRobot:
         self._use_user_topic = False
         return int(res[0])
 
-    def current_mode(self):
-        """内蔵制御サービスの状態を返す(表示用)。'(解放中)' なら未使用。"""
+    def current_mode(self, timeout=2.5):
+        """内蔵制御サービスの状態を返す(表示用)。'(解放中)' なら未使用。
+
+        ★'?' は **CheckModeが読めなかっただけ** で、解放されている証拠では
+          ない。両者を混同しないこと(_select_ai のコメント参照)。
+        """
         if self._msc is None:
             return "?"
-        ok, res = _rpc("CheckMode", self._msc.CheckMode)
+        ok, res = _rpc("CheckMode", self._msc.CheckMode, timeout=timeout)
         if not ok or res is None:
             return "?"
         code, result = res
@@ -461,6 +488,29 @@ class RealRobot:
             time.sleep(0.02)
         return False, time.time() - t0
 
+    def _state_poll_loop(self):
+        """LowStateを約180Hzで読む。**制御ループとは別スレッド**。
+
+        Read() は take_one()。履歴QoSが KEEP_LAST(1) なので、溜まった古い
+        サンプルではなく**常に最新**が返る(実測: tickの差分が中央5=1043/180
+        で、キューに追従遅れが出ていないことを確認済み)。
+        LowStateは1043Hzで来るので Read() は待たずに返り、実質この sleep が
+        取得レートを決める。50Hz制御に対して遅れは最大5.5ms。
+
+        ★例外を外へ出さないこと。このスレッドが死ぬとLowStateが更新されず、
+          コックピットは受信途絶と判定して自動DAMPする。
+        """
+        while not self._poll_stop:
+            try:
+                msg = self._sub.Read()
+                if msg is not None:
+                    self._on_state(msg)
+            except Exception as e:                 # noqa: BLE001
+                self._recv_err += 1
+                if self._recv_err in (1, 10, 100):
+                    print(f"★LowStateの読み取りで例外({self._recv_err}回): {e}")
+            time.sleep(0.0055)                     # ≒180Hz
+
     def _on_state(self, msg):
         """1042Hzで呼ばれる。**1回のループで全部読む**(GILを長く握らないため)
 
@@ -478,35 +528,47 @@ class RealRobot:
             self._last_state_t = time.time()       # 受信自体は来ている
 
     def _on_state_body(self, msg):
+        """★2026-09-03 オンボード対策。この関数は1043Hzで呼ばれる。
+
+        従来は毎回29関節×9項目を numpy へ**1要素ずつ**代入していた
+        (約260回/コール = 27万回/秒)。PC(x86)は単スレッド性能が高いので
+        問題にならなかったが、機体(Jetson ARM 1.98GHz)ではこれだけで1コアを
+        使い切り、**GIL越しに50Hz制御ループを餓死**させて制御周期71ms(14Hz)
+        まで落ちた(実測。方策が自動DAMPされた)。
+
+        いまは _state_poll_loop が約180Hzで呼ぶ(1043Hzの全コマではない)ので、
+        制御に要る値は毎回取り込む。記録用の値だけ4回に1回=約45Hzに間引く
+        (記録は50Hzなので実用上そろう)。
+        あわせて1要素ずつの代入をやめ、内包表記＋スライス一括代入にする
+        (numpyのスカラ代入は boxing のぶん遅い)。
+        """
+        n = self._nstate = self._nstate + 1
+        now = time.time()
+        ms = msg.motor_state
+        im = msg.imu_state
         with self.lock:
-            for i in range(29):
-                m = msg.motor_state[i]
-                self.q[i] = m.q
-                self.dq[i] = m.dq
-                self.ddq[i] = m.ddq
-                self.tau[i] = m.tau_est
-                t = m.temperature
-                self.temps[i] = t[0]
-                self.temps2[i] = t[1]
-                self.vol[i] = m.vol
-                self.mstate[i] = m.motorstate
-                self.mmode[i] = m.mode
-            im = msg.imu_state
+            self.q[:] = [ms[i].q for i in range(29)]
+            self.dq[:] = [ms[i].dq for i in range(29)]
+            self.tau[:] = [ms[i].tau_est for i in range(29)]
             self.quat[:] = im.quaternion
             self.gyro[:] = im.gyroscope
             self.accel[:] = im.accelerometer
             self.rpy[:] = im.rpy
-            self.imu_temp = im.temperature
             self.tick = msg.tick
             self.mode_pr = msg.mode_pr
             self.mode_machine = msg.mode_machine
-            self._nstate += 1
-            if self._nstate % 20 == 0:            # ≒50Hz。記録の頻度に合わせる
+            if n % 4 == 0:                 # ≒45Hz。記録の頻度に合わせる
+                self.ddq[:] = [ms[i].ddq for i in range(29)]
+                self.vol[:] = [ms[i].vol for i in range(29)]
+                self.mstate[:] = [ms[i].motorstate for i in range(29)]
+                self.mmode[:] = [ms[i].mode for i in range(29)]
+                self.temps[:] = [ms[i].temperature[0] for i in range(29)]
+                self.temps2[:] = [ms[i].temperature[1] for i in range(29)]
+                self.imu_temp = im.temperature
                 for i in range(29):
-                    m = msg.motor_state[i]
+                    m = ms[i]
                     self.msensor[i, :] = m.sensor
                     self.mreserve[i, :] = m.reserve
-                ms = msg.motor_state
                 for k in range(6):
                     j = 29 + k
                     if j < len(ms):
@@ -519,7 +581,7 @@ class RealRobot:
                 self.version[:] = msg.version
                 self.ls_reserve[:] = msg.reserve
                 self.crc = msg.crc
-            self._last_state_t = time.time()
+            self._last_state_t = now
 
     # ---- 標準モード(SDK) / カスタム制御の排他
     def ensure_custom(self, kp=None, kd=None):
@@ -657,15 +719,21 @@ class RealRobot:
             f"  ※このACKは成否を表さない")
         # 6) FSM=1000 の確認
         f = None
+        seen = []                       # 途中経過。?はGetFsmIdがRPC不達
         t0 = time.time()
-        while time.time() - t0 < 2.0:
+        while time.time() - t0 < USER_CTRL_CONFIRM_S:
             f = self.get_fsm_id()
+            seen.append("?" if f is None else str(f))
             if f == 1000:
                 break
             time.sleep(0.2)
+        if f == 1000 and len(seen) > 1:
+            log(f"FSM 1000 の確認に {time.time() - t0:.1f}秒 かかりました"
+                f"(経過 {'→'.join(seen[-8:])})")
         if f != 1000:
             log(f"★FSMが1000にならない(いま{f})。切り替わっていません。"
-                f"送信を止めて中止します")
+                f"送信を止めて中止します  経過 {'→'.join(seen[:24])}"
+                f"  ※?はGetFsmIdがRPC不達(CPU競合の疑い)")
             self._stream_on = False
             self.set_topic(False)
             return False, f"UserCtrlへ入れない(FSM={f})"
@@ -686,8 +754,9 @@ class RealRobot:
 
     def standard_mode(self, name):
         """Unitree標準モードへ(SDK)。こちらの送信は停止する。
-        name: zero / damp / stand / walk
-        FSM id(g1_loco_client): 0=ゼロトルク 1=ダンプ 4=立ち上がり 200=運用制御
+        name: zero / damp / stand / walk / sit / seated
+        FSM id(g1_loco_client): 0=ゼロトルク 1=ダンプ 2=スクワット 3=着座
+                                4=立ち上がり 200=運用制御
 
         ★この関数はRPCを含むので**50Hz制御ループから直接呼ばない**こと
           (コックピットはワーカースレッドで呼ぶ)。
@@ -713,6 +782,13 @@ class RealRobot:
             ok, _ = _rpc("SetFsmId(4)", self._loco.SetFsmId, 4, timeout=4.0)
         elif name == "walk":
             ok, _ = _rpc("SetFsmId(200)", self._loco.SetFsmId, 200, timeout=4.0)
+        elif name == "sit":
+            ok, _ = _rpc("SetFsmId(2)", self._loco.SetFsmId, 2, timeout=4.0)
+        elif name == "seated":
+            # FSM 3 = 着座。方策で座り終えた姿勢から内蔵制御へ渡す先。
+            # スクワット(2)は立位でしゃがむモードなので、座った状態からは
+            # 立ち上がろうとしうる。座った姿勢の引き継ぎにはこちらを使う。
+            ok, _ = _rpc("SetFsmId(3)", self._loco.SetFsmId, 3, timeout=4.0)
         else:
             print(f"★未知の標準モード: {name}")
             return False
@@ -733,21 +809,41 @@ class RealRobot:
         ★連打はしない。0.5秒ごとに SelectMode を送ると切替完了前に上書きし
           続けて、いつまでも解放中のままになる(実測: 連打で6秒粘っても復帰
           せず、呼ぶのをやめた0.5秒後に復帰していた)。
+
+        ★2026-09-03。CheckModeが返らないとき current_mode() は '?' を返すが、
+          これは**読めなかっただけ**で解放されている証拠ではない。以前は
+          '(解放中)' と同一視してここで6秒粘り、続けて呼び出し元のRPC(4秒)が
+          走るので、UIのボタンが最大10秒返らなかった。その間 busy なので
+          他のボタンも全部「処理中です」で弾かれ、操作不能に見えていた。
+          コントローラーで歩かせた直後は loco 側が忙しく CheckMode の応答が
+          遅れるため、必ずここに嵌まっていた(オンボードだとコックピットが
+          制御サービスとCPUを分け合うぶん、さらに出やすい)。
+          → 読めないときは粘らずに先へ進む。指令を送るほうが、送らずに
+            諦めるより操作者の意図に沿う(諦めても機体の状態は改善しない)。
         """
         if self._msc is None:
             return False
         t0 = time.time()
+        unread = 0
         for attempt in range(3):
             if time.time() - t0 > timeout:         # 実時間で必ず打ち切る
                 break
-            if self.current_mode() not in ("(解放中)", "?"):
+            m = self.current_mode(timeout=0.8)     # 探りは短く(応答性優先)
+            if m not in ("(解放中)", "?"):
                 if attempt:
                     print(f"  制御サービス復帰({time.time() - t0:.1f}秒)")
                 return True
+            if m == "?":                           # 読めないだけ。粘らない
+                unread += 1
+                if unread >= 2:
+                    print(f"  CheckModeが読めない({time.time() - t0:.1f}秒)。"
+                          f"解放中とは限らないのでこのまま指令を送ります")
+                    return True
+                continue
             _rpc("SelectMode(ai)", self._msc.SelectMode, "ai")
             t1 = time.time()
             while time.time() - t1 < timeout / 3 and time.time() - t0 < timeout:
-                if self.current_mode() not in ("(解放中)", "?"):
+                if self.current_mode(timeout=0.8) not in ("(解放中)", "?"):
                     print(f"  制御サービス復帰({time.time() - t0:.1f}秒)")
                     return True
                 time.sleep(0.3)
@@ -1016,4 +1112,5 @@ class RealRobot:
             print(f"★終了時のdamp送信に失敗: {e}")
         finally:
             self._stop = True
+            self._poll_stop = True             # LowStateのポーリングも止める
             time.sleep(0.02)
