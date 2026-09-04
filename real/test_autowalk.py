@@ -321,13 +321,13 @@ def test_align():
 
 
 def test_lock():
-    print("--- 5c. 目的地でロック立位(足踏みをやめる)→ 次の前進で歩行へ自動で戻る ---")
+    print("--- 5c. 目的地で 802(足踏みをやめる)→ 次の前進で歩行へ自動で戻る ---")
     robot, tk, wc = _setup([dict(x=2.0, y=0.0, w=4.0, d=0.2, h=1.0)],
                            dict(v_fwd=0.5, stop_dist=0.6, mode="forward", max_fwd=6.0))
     check(wc.start_auto(), "前進 開始")
     dt = _wait(wc, 90)
     print(f"    結果: {wc.auto.result}  FSM={robot.get_fsm_id()}  x={robot._wx:.2f}  所要{dt:.1f}秒")
-    check(wc.auto.result.startswith("完了") and robot.get_fsm_id() == 4, f"止まった後はロック立位 FSM 4(いま {robot.get_fsm_id()})")
+    check(wc.auto.result.startswith("完了") and robot.get_fsm_id() == 802, f"止まった後は立位の歩行制御 FSM 802(いま {robot.get_fsm_id()})")
     check(wc.status().get("locked") is True, "状態に locked=True")
     check(wc.tele(0.3, 0.0, 0.0) is False, "ロック中は十字キーを受けない")
     robot.sim_obstacles([dict(x=robot._wx + 2.0, y=0.0, w=4.0, d=0.2, h=1.0)])
@@ -335,7 +335,7 @@ def test_lock():
     check(wc.start_auto(), "2 回目の前進 開始(ロック立位から自動で歩行へ)")
     dt = _wait(wc, 90)
     print(f"    結果: {wc.auto.result}  FSM={robot.get_fsm_id()}  所要{dt:.1f}秒")
-    check(wc.auto.result.startswith("完了") and robot.get_fsm_id() == 4, "2 回目も完了し、再びロック立位")
+    check(wc.auto.result.startswith("完了") and robot.get_fsm_id() == 802, "2 回目も完了し、再び 802 で静止")
     tk.on = False
     wc.close()
 

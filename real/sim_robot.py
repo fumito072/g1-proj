@@ -364,6 +364,14 @@ class SimRobot:
         log("(sim) 歩行 FSM 501 に入りました(運動学モック。バランス制御は模さない)")
         return True, 501
 
+    def enter_standing_loco(self, log=print):
+        self._fsm_id = 802
+        self.walk_mode = False
+        self.balance_hold = True
+        self._upright()
+        log("(sim) 802(立位の歩行制御)に入りました")
+        return True, 802
+
     def set_speed_mode(self, mode, log=print):
         log(f"(sim) 速度モード {int(mode)}")
         return True

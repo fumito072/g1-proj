@@ -71,7 +71,7 @@ USER_CTRL_CONFIRM_S = 6.0
 #   速度指令を受けるのは loco の 500/501(最新 SDK の Start() = SetFsmId(500)。旧 SDK の Start は 200 で、
 #   当 FW では 200 を送ると 501 と読める)。802 は着座の UserCtrl(7110)への入口としてだけ使う
 WALK_FSMS = {200, 500, 501}
-LOCO_ENTRY_FSMS = (500, 200)      # 歩行へ入れるときに試す順(最新 SDK → 旧 SDK)
+LOCO_ENTRY_FSMS = (200, 500)      # 歩行へ入れるときに試す順。★当 FW(実測 2026-09-04)は 200 で入り 500 は無反応(6 秒無駄)→ 200 を先に
 
 
 def _rpc(label, fn, *args, timeout=2.5):
@@ -985,10 +985,20 @@ class RealRobot:
         if f in WALK_FSMS:
             return True, f
         if f in (801, 802):
-            log(f"FSM {f}(走行29dof)は速度指令を受けないので、ロック立位(4)を経て歩行(500)へ入れます")
+            # 802(立位の歩行制御)から歩行(200)へ。直接通ればそれで良い。だめならロック立位(4)を経由
+            log(f"FSM {f}(走行29dof)から歩行(200)へ戻します")
+            _rpc("SetFsmId(200)", self._loco.SetFsmId, 200, timeout=4.0)
+            t0 = time.time()
+            while time.time() - t0 < 3.0:
+                time.sleep(0.4)
+                f = self.get_fsm_id()
+                if f in WALK_FSMS:
+                    log(f"歩行 FSM {f} に到達({time.time() - t0:.1f}秒)。速度指令が効く状態です")
+                    return True, f
+            log(f"802→200 は通らなかった(いま {f})。ロック立位(4)を経由します")
             _rpc("SetFsmId(4)", self._loco.SetFsmId, 4, timeout=4.0)
             t0 = time.time()
-            while time.time() - t0 < 6.0:
+            while time.time() - t0 < 4.0:
                 time.sleep(0.4)
                 f = self.get_fsm_id()
                 if f == 4:
@@ -1001,7 +1011,7 @@ class RealRobot:
             log(f"★歩行(FSM {fid})へ遷移します — 歩行制御が動きます。機体を接地させ、リモコンE-STOPを握ってください")
             ok, res = _rpc(f"SetFsmId({fid})", self._loco.SetFsmId, fid, timeout=4.0)
             t0 = time.time()
-            while time.time() - t0 < 6.0:
+            while time.time() - t0 < 3.0:
                 time.sleep(0.4)
                 f = self.get_fsm_id()
                 if f in WALK_FSMS:
@@ -1009,6 +1019,24 @@ class RealRobot:
                     return True, f
             log(f"FSM {fid} へ入れなかった(いま {f}、応答 {res})")
         return False, f
+
+    def enter_standing_loco(self, log=print):
+        """目的地で足踏みをやめる: 歩行(200)から 802(走行29dof)へ。802 は速度指令を受けず立位で静止する
+        (2026-09-04 実測: 802 で SetVelocity を送っても動かない / 9/3: 200・501・4 から 802 へ 0.4 秒で通る)。
+        ★4(ロック立位)は 200 から受け付けない(15:39 実測: SetFsmId(4) 応答 0 だが FSM は 200 のまま)。
+        戻り値: (成功か, いまのFSM)"""
+        if self._loco is None:
+            return False, None
+        for i in range(2):
+            _rpc("SetFsmId(802)", self._loco.SetFsmId, 802, timeout=4.0)
+            t0 = time.time()
+            while time.time() - t0 < 3.0:
+                time.sleep(0.3)
+                f = self.get_fsm_id()
+                if f == 802:
+                    return True, f
+            log(f"802 への切替: まだ FSM {f}(試行 {i + 1})")
+        return False, self.get_fsm_id()
 
     def set_speed_mode(self, mode, log=print):
         """SetSpeedMode(7107、最新 SDK)。-1/0/1/2(SDK 例の取りうる値。0=標準)。歩行 FSM でだけ効く"""

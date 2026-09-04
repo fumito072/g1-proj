@@ -1186,12 +1186,12 @@ class AutoWalk:
             self.msg = f"{label}: 望む{vcmd:+.2f}m/s(指令{c:+.2f}) 残り{rem * 100:+.0f}cm"
             self._rec(v=round(vcmd, 3), c=round(c, 3), x=round(float(x), 3), rem=round(float(rem), 3))
 
-    def _final_approach(self, axis, target, label):
-        """最後の寄せ(目標まで final_zone 以内): 一定のゆっくりした実速度で歩き続け、残りが 5cm 以下になった
+    def _final_approach(self, axis, target, label, lidar_stop=None):
+        """最後の寄せ(目標まで final_zone 以内): 一定のゆっくりした実速度で歩き続け、残りが 8cm 以下になった
         瞬間に**一度だけ**止める。行き過ぎても戻さない(ピタッと止まる。操作者の指示)。
-        ★以前の「短い指令→止めて測る」の繰り返しは、指令の出し止めのたびに機体が後ろへ揺り戻り
-          (実機 14:27〜14:28: 1 回で −4〜−16cm)、目的の距離の後で少しずつ後ろへ戻って見えた。
-        axis='s'(経路に沿って) / 'e'(横)。target はその軸の値(経路座標)。"""
+        axis='s'(経路に沿って) / 'e'(横)。target はその軸の値(経路座標)。
+        lidar_stop(壁の手前の停止距離[m])を渡すと、残りは **LiDAR の前方距離** で測る(オドメトリは足踏みも
+        距離に数えるので、実機 15:39 は壁の 1.02m 手前で「到達」してしまった)。LiDAR が取れない間はオドメトリ。"""
         cax = "y" if axis == "e" else "x"
         v_slow = 0.08                                    # 望む実速度[m/s](指令は下限 cmd_min_walk=0.30 になる)
         tol = 0.08                                       # 多少のずれは許容し、少し手前で一度だけ止める(操作者の指示)
@@ -1207,6 +1207,8 @@ class AutoWalk:
             s, e = self._pose(od)
             x = s if axis == "s" else e
             rem = (target - x) * sgn
+            if lidar_stop is not None and obs.get("ok") and obs.get("dist") is not None:
+                rem = float(obs["dist"]) - float(lidar_stop)        # ★LiDAR を真とする
             self.offset = e
             if axis == "s":
                 self.traveled = getattr(self, "traveled_base", 0.0) + s
@@ -1241,13 +1243,18 @@ class AutoWalk:
         od, _o = self._sense()
         s_prev, e_prev = self._pose(od)
         t_prev = time.time()
+        d_prev = None
         while time.time() - t0 < t_max:
             time.sleep(0.1)
-            od, _o = self._sense()
+            od, o = self._sense()
             self.io["vel"](0.0, 0.0, 0.0)
             s, e = self._pose(od)
             now = time.time()
             v = math.hypot(s - s_prev, e - e_prev) / max(0.05, now - t_prev)
+            d = o.get("dist") if o.get("ok") else None
+            if d is not None and d_prev is not None and abs(d - d_prev) < 0.5:
+                v = abs(d - d_prev) / max(0.05, now - t_prev)          # 壁が見えていれば LiDAR で静止を測る
+            d_prev = d
             s_prev, e_prev, t_prev = s, e, now
             if v < still_v:
                 t_still = t_still or now
@@ -1387,7 +1394,7 @@ class AutoWalk:
                 d0 = obs0.get("wall_dist") if obs0.get("ok") else None
                 self.io["vel"](0.0, 0.0, 0.0)
                 ok = self.io["lock_stand"]()
-                self.io["log"]("足踏みをやめてロック立位(FSM 4)へ" + ("切り替えました" if ok else "切り替えられませんでした(★歩行のまま)"))
+                self.io["log"]("足踏みをやめて立位の歩行制御(FSM 802。速度指令を受けず静止する)へ" + ("切り替えました" if ok else "切り替えられませんでした(★歩行のまま)"))
                 t0 = time.time()
                 while time.time() - t0 < 3.0:
                     time.sleep(0.1)
@@ -1490,8 +1497,14 @@ class AutoWalk:
             if now - t_phase > t_limit:
                 raise _Abort(f"中止(FORWARD): 時間切れ({t_limit:.0f}秒)")
             s, e = self._pose(od)
-            if s_prev is not None:
+            d_now = obs.get("dist") if obs.get("ok") else None
+            d_prev = getattr(self, "_d_prev", None)
+            if d_now is not None and d_prev is not None and abs(d_now - d_prev) < 0.5:
+                # 壁が見えているときは LiDAR の距離の減りを実速度にする(オドメトリは足踏みも距離に数える)
+                self.v_meas = 0.7 * self.v_meas + 0.3 * ((d_prev - d_now) / dt)
+            elif s_prev is not None:
                 self.v_meas = 0.7 * self.v_meas + 0.3 * ((s - s_prev) / dt)
+            self._d_prev = d_now
             s_prev = s
             self.traveled, self.offset = getattr(self, "traveled_base", 0.0) + s, e
             if not obs.get("ok"):
@@ -1560,7 +1573,7 @@ class AutoWalk:
             #     (小さな指令を出し続けると足踏みのまま居座る: 14:09 の実機)
             if (veer is None and d_stop is not None and 0.03 < d_stop <= float(p.get("final_zone", 0.6))
                     and self.v <= 0.35 and self.v_meas <= float(p.get("v_enter_final", 0.15))):
-                self._final_approach("s", s + d_stop, "壁の手前")     # ★経路座標 s(進み traveled ではない)。後ろへは歩かない
+                self._final_approach("s", s + d_stop, "壁の手前", lidar_stop=float(p["stop_dist"]))   # LiDAR 基準。後ろへは歩かない
                 self.io["vel"](0.0, 0.0, 0.0)
                 self.v = 0.0
                 what = "壁" if (ah and ah["wall"]) or wall_d is not None else "障害物"
@@ -1668,6 +1681,7 @@ class AutoWalk:
                 od, obs = self._sense()
                 self._set_path(od)                  # 正対した向きで経路(直進の基準)を張り直す
         how = self._forward()
+        self.need_lidar = False                     # 止まった後は LiDAR が途切れても中止しない
         self._log_post_stop()
         if how == "max":
             self.result = (f"完了(壁なし): 最大前進距離{p['max_fwd']:.1f}mに到達"
@@ -1982,23 +1996,22 @@ class WalkController:
     def _lock_stand(self):
         """目的地でロック立位(FSM 4)へ。足踏みをやめてバランスだけで静止する。戻り値: 成功か"""
         ok = False
+        f = None
         try:
-            self.sender.stop("ロック立位へ")
+            self.sender.stop("立位の歩行制御(802)へ")
             time.sleep(0.3)
-            for i in range(2):
-                self.robot.standard_mode("stand")
-                time.sleep(1.0)
+            fn = getattr(self.robot, "enter_standing_loco", None)
+            if fn is not None:
+                ok, f = fn(log=self.log)
+            else:
+                ok = bool(self.robot.standard_mode("stand"))
                 f = self.robot.get_fsm_id()
-                if f == 4:
-                    ok = True
-                    break
-                self.log(f"ロック立位の切替: まだ FSM {f}(試行 {i + 1})")
         except Exception as ex:                    # noqa: BLE001
-            self.log(f"★ロック立位へ切り替えられません: {ex}")
+            self.log(f"★立位の歩行制御へ切り替えられません: {ex}")
             ok = False
         self.locked = ok
         if ok:
-            self.fsm_id = 4
+            self.fsm_id = f
         return ok
 
     def _unlock_if_needed(self):
@@ -2011,7 +2024,7 @@ class WalkController:
         if f in WALK_FSMS:
             self.locked = False
             return True
-        self.log("ロック立位から歩行へ戻します")
+        self.log("静止(802)から歩行(200)へ戻します")
         ok, f2 = self.robot.ensure_walk_mode(log=self.log)
         self.fsm_id = f2
         self.locked = not ok
