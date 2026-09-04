@@ -1,0 +1,30 @@
+# G1 LiDAR ブリッジ(Livox SDK2 直結 → /dev/shm/g1_lidar.npy)。機体の起動時に自動で立ち上がる。
+# 配置: /etc/systemd/system/g1-lidar-bridge.service   (real/install_autostart.sh が入れる)
+[Unit]
+Description=G1 LiDAR bridge (Livox SDK2 -> /dev/shm)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=unitree
+Group=unitree
+WorkingDirectory=/home/unitree/cl-workspace/g1_cockpit/real
+Environment=HOME=/home/unitree PYTHONUNBUFFERED=1
+Environment=LD_LIBRARY_PATH=/usr/local/lib
+Nice=5
+# eth0 に 192.168.123.x が付くまで待つ(最長2分)。Livox は 192.168.123.120。
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 60); do ip -4 addr show eth0 2>/dev/null | grep -q "inet 192\\.168\\.123\\." && exit 0; sleep 2; done; echo "eth0 に 192.168.123.x が付かない"; exit 1'
+# 時刻が合うまで待つ(Jetson は RTC 電池なしで起動直後は 1970 年。ログの日時と走行ログの名前が狂う)。最長 60 秒
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 60); do [ "$(date +%%Y)" -ge 2024 ] && exit 0; sleep 1; done; echo "時刻が同期しない(1970のまま起動)"; exit 0'
+ExecStartPre=/bin/bash -c ': > /home/unitree/cl-workspace/lidar_bridge.log'
+ExecStart=/usr/bin/python3 -u /home/unitree/cl-workspace/g1_cockpit/real/lidar_bridge.py
+StandardOutput=append:/home/unitree/cl-workspace/lidar_bridge.log
+StandardError=inherit
+# 落ちたら 10 秒後に立て直す(LiDAR の電源が後から入る場合も拾う)
+Restart=always
+RestartSec=10
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

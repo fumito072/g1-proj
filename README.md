@@ -7,10 +7,34 @@ Unitree G1(29DoF)に強化学習の方策で椅子へ座らせるシステム。
 
 ---
 
+## 2026-09-04 の追加(このPCで実施。★実機未検証)
+
+| 追加 | どこ | 文書 |
+|---|---|---|
+| **Android(スマホ)から無線で操作** — 1カラム表示・画面下固定の E-STOP/歩行停止・画面消灯防止・ホーム画面追加 | `real/cockpit.py`(PAGE) | [docs/Android無線操作.md](docs/Android無線操作.md) |
+| **十字キーの手動歩行**(押している間だけ。0.5秒のデッドマン二重) | `real/autowalk.py` / `real/cockpit.py` | 同上 §4 |
+| **自動歩行: 前進 → LiDARで障害物の手前に停止 → 決めた距離だけ横移動** | `real/autowalk.py`(本体) / `real/real_robot.py`(SetVelocity・LiDAR/odom購読・4→802) / `real/sim_robot.py`(運動学モック+合成LiDAR) | [docs/自動歩行_障害物停止_横移動.md](docs/自動歩行_障害物停止_横移動.md) |
+| 方策の完了後の既定を **着座(FSM3)→ダンプ** に変更 | `real/cockpit.py` `after_phase` | Android無線操作.md §5 |
+| 机上試験 `python3 real/test_autowalk.py`(障害物検出・デッドマン・通し・途絶中止) | `real/test_autowalk.py` | 自動歩行 §8 |
+| **着座の「膝が出る」「回転する」の解析** — 実機11本で確認、原因は方策(早落ち・浅い着座・ヨーの癖)、走行ごとの数値化(`real/sit_shape.py`)と脚残差の試験オプション | `real/sit_shape.py` / `real/cockpit.py` | [docs/着座_膝と回転の解析_20260904.md](docs/着座_膝と回転の解析_20260904.md) |
+| **通信途絶で damp しない安全設計** — 方策の実行中は最後まで、方策なしのPD保持は内蔵バランスへ返して静止、歩行は速度ゼロ | `real/cockpit.py` / `real/real_robot.py` `return_to_balance` | [docs/通信途絶時の安全設計_20260904.md](docs/通信途絶時の安全設計_20260904.md) |
+| **かんたん画面**(既定 `/`。詳細は `/detail`) — ダンプ/スタンドロック/歩行モード、前進(壁の手前で段階減速・障害物は回り込み)、横歩き(足踏み)・5cm・後ろへ5/10cm、LiDAR上面図、着座の事前確認(サーバ側点検+操作者確認+3秒)、E-STOP | `real/cockpit.py` PAGE_SIMPLE | Android無線操作.md §2 |
+| **LiDAR ブリッジ** — この FW では rt/utlidar/* が無いので、機体内の Livox SDK2 を ctypes で直接叩いて /dev/shm へ点群を書く(上下逆さ取付を自動補正) | `real/lidar_bridge.py` / `real/start_onboard.sh` | 自動歩行 §6b |
+| **深く座る** — 座面接触を検知したら膝・足首の残差を2秒で抜いて参照の深い着座姿勢へ(シム 後退 23→32cm)。既定 ON | `real/cockpit.py` `_contact_update` | 着座解析 §3-0 |
+| **方策の整理** — deploy/ は `sit_up_ln23_r2`(本番)・`sit_up_ln21_r2`(A/B対照)・`climb_slow_r2`・`turn_wide_r2` の4つだけに。他19本は `deploy_archive_20260904/` へ退避 | `deploy/` | deploy/README.md |
+| 機体への同期+起動 `./deploy_to_robot.sh [wifi] [sync]` | `deploy_to_robot.sh` | |
+
+| 自動起動 | `real/systemd/g1-lidar-bridge.service`・`g1-cockpit.service`、`real/install_autostart.sh` | 機体の電源投入で LiDAR ブリッジ→コックピットが自動で立ち上がる(Jetson 再起動で確認)。`start_onboard.sh` はサービス再起動に化ける。docs/オンボード運用.md §10 |
+| 着座の修正(9/4 午後) | `real/cockpit.py` | 接触後フェードは実機で 3/3 崩れた(誤検知で残差が消えロール33°・ヨー90°)→ **既定 OFF**、検知にゲート。完了時に座面に載っている証拠が無ければ自動ダンプを保留(赤帯)。docs/着座_膝と回転の解析_20260904.md §3-0b |
+| 小刻みステップ(9/4 午後) | `real/autowalk.py`(`_step_axis`)、`real/sim_robot.py`、かんたん画面 | 後退ナッジが実機で進まなかった(弱いパルスでは内蔵歩行が一歩も出ない)ため、横歩き・5cm・後退・[1歩] を「確実に一歩出る短い指令→止めてオドメトリで測る」方式に統一。1歩の推定を実測で更新、3歩で進まなければ中止。docs/自動歩行_障害物停止_横移動.md §6b-3。実機未検証 |
+| 12:36 の転倒の原因と対策 | `real/systemd/*.service`、`real/start_onboard.sh`、`real/cockpit.py` | 再起動後のサービスで制御周期が 23 Hz に落ちガードでダンプ→立位のまま前へ倒れた。jetson_clocks 固定・DDS 環境変数・Nice・走行中の再起動拒否。完了後の既定を元の FSM3 へ戻す。docs/着座_膝と回転の解析_20260904.md §3-0c |
+実機での検証順は 自動歩行 §6(A 距離表示 → B ドライラン → C 十字キー → D 短距離 → E 既定値)。
+
 ## 引き継ぐ人がまず読むもの(この順で)
 
 | # | 文書 | 内容 |
 |---|---|---|
+| 0 | [docs/Android無線操作.md](docs/Android無線操作.md) | スマホからの無線操作(2026-09-04) |
 | 1 | **[docs/オンボード運用.md](docs/オンボード運用.md)** | **起動方法と、実機で嵌まった問題の全記録。まずこれ** |
 | 2 | [実機セッション_20260827.md](実機セッション_20260827.md) | 現場手順。特に §0(落下原因)と §7(やってはいけないこと) |
 | 3 | **[docs/RTX.md](docs/RTX.md)** | 学習側の全記録。方策の系譜・実測・未解決課題 |

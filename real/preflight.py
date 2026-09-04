@@ -361,28 +361,33 @@ def check_ui():
     import re
     head("6b. UI(HTML/JS)の健全性")
     src = (HERE / "cockpit.py").read_text(encoding="utf-8")
-    i = src.index('PAGE = """')
-    j = src.index('"""', i + 10)
-    page_src = src[i:j]
-    # ★\n だけでなく \u000a \x0a \t なども Python が解釈して本物の文字になる。
-    #   2026-08-27に \u000a で onclick を壊した(4回目)。全部見る。
-    bad = []
-    for m in re.finditer(r'(?<!\\)\\(n|t|r|x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|0)',
-                         page_src):
-        bad.append((page_src[:m.start()].count("\n") + 1, m.group(0)))
-    if bad:
-        ng(f"PAGE の中に Python が解釈するエスケープがある {bad[:6]} — "
-           f"本物の文字に化けてHTML/JSが壊れる。二重にする(\\\\n)か "
-           f"String.fromCharCode() を使うこと")
-    else:
-        ok("PAGE に危険なエスケープは無い")
-
-
+    # ★2026-09-04 かんたん画面(PAGE_SIMPLE)も同じ検査に掛ける
+    for marker in ('PAGE = """', 'PAGE_SIMPLE = """'):
+        i = src.index(marker)
+        j = src.index('"""', i + len(marker))
+        page_src = src[i:j]
+        # Python が解釈するエスケープ(バックスラッシュ+n/t/r/x??/u????/0)が
+        # 三重引用符の中にあると本物の文字に化けてHTML/JSが壊れる。全部見る。
+        bad = []
+        for m in re.finditer(r'(?<!\\)\\(n|t|r|x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|0)',
+                             page_src):
+            bad.append((page_src[:m.start()].count("\n") + 1, m.group(0)))
+        if bad:
+            ng(f"{marker[:-6]} の中に Python が解釈するエスケープがある {bad[:6]} — "
+               f"本物の文字に化けてHTML/JSが壊れる。二重にする(\\\\n)か "
+               f"String.fromCharCode() を使うこと")
+        else:
+            ok(f"{marker[:-6]} に危険なエスケープは無い")
 
     sys.path.insert(0, str(HERE))
     import cockpit                                  # noqa: E402
-    cockpit_page = cockpit.PAGE
-    js = cockpit.PAGE.split("<script>")[1].split("</script>")[0]
+    for page_name in ("PAGE", "PAGE_SIMPLE"):
+        _check_page_js(getattr(cockpit, page_name), page_name)
+
+
+def _check_page_js(cockpit_page, page_name):
+    import re
+    js = cockpit_page.split("<script>")[1].split("</script>")[0]
     def code_part(line):
         """行の中で、文字列の外にある // 以降を落とす(http:// を誤検出しない)"""
         q = None
@@ -407,9 +412,9 @@ def check_ui():
         elif body.count("'") % 2:
             inline.append((m.group(1), body[:40]))
     if inline:
-        ng(f"インライン属性が壊れている(改行 or 引用符の不一致): {inline[:4]}")
+        ng(f"{page_name}: インライン属性が壊れている(改行 or 引用符の不一致): {inline[:4]}")
     else:
-        ok("インライン属性(onclick等)は健全")
+        ok(f"{page_name}: インライン属性(onclick等)は健全")
 
     lines = js.split("\n")
     broken = []
@@ -418,20 +423,22 @@ def check_ui():
         if code.count("'") % 2 or code.count("`") % 2:
             broken.append((n, l.strip()[:50]))
     if broken:
-        ng(f"JSの文字列が行内で閉じていない: {broken}")
+        ng(f"{page_name}: JSの文字列が行内で閉じていない: {broken}")
     else:
-        ok(f"JSの文字列リテラルは全て閉じている({len(lines)}行)")
+        ok(f"{page_name}: JSの文字列リテラルは全て閉じている({len(lines)}行)")
     # コメント行の次の行が「日本語だけ」なら、改行で割れた疑い
     susp = [(n, lines[n].strip()[:40]) for n in range(len(lines) - 1)
             if "//" in lines[n] and n + 1 < len(lines)
             and re.match(r'^[ぁ-んァ-ン一-龥]+$', lines[n + 1].strip())]
     if susp:
-        ng(f"コメントが改行で割れている疑い: {susp}")
+        ng(f"{page_name}: コメントが改行で割れている疑い: {susp}")
     else:
-        ok("コメントが改行で割れていない")
-    for need in ("function askRun", "function tick", "setInterval(tick"):
-        (ok if need in js else ng)(f"{need} がある" if need in js
-                                   else f"★{need} が無い")
+        ok(f"{page_name}: コメントが改行で割れていない")
+    needs = (("function askRun", "function tick", "setInterval(tick") if page_name == "PAGE"
+             else ("function walkGo", "function sitGo", "function tick", "setInterval(tick"))
+    for need in needs:
+        (ok if need in js else ng)(f"{page_name}: {need} がある" if need in js
+                                   else f"★{page_name}: {need} が無い")
 
 
 # ---------------------------------------------------------------- 6c. 配線
@@ -447,9 +454,13 @@ def check_ui_wiring():
     import re
     head("6c. UIのボタンとサーバの配線")
     src = (HERE / "cockpit.py").read_text(encoding="utf-8")
-    i = src.index(chr(80) + 'AGE = ' + chr(34) * 3)
-    j = src.index(chr(34) * 3, i + 10)
-    page = src[i:j]
+    # ★2026-09-04 詳細画面(PAGE)とかんたん画面(PAGE_SIMPLE)の両方を見る
+    pages = {}
+    for marker in ('PAGE = """', 'PAGE_SIMPLE = """'):
+        i = src.index(marker)
+        j = src.index('"""', i + len(marker))
+        pages[marker[:-6]] = src[i:j]
+    page = "\n".join(pages.values())
     used = set(re.findall(r"cmd\(\s*'([a-z_]+)'", page))
     m = re.search(r"CMD_ALLOW = \(([^)]*)\)", src, re.S)
     allow = set(re.findall(r'"([a-z_]+)"', m.group(1))) if m else set()
@@ -472,14 +483,15 @@ def check_ui_wiring():
     dead = sorted(allow - used)
     if dead:
         warn(f"サーバは受け付けるがUIから呼ばれていない: {dead}")
-    ids = set(re.findall(r'id="([a-zA-Z_]+)"', page))
-    # getElementById('sel_'+k) のような連結は静的には解決できないので外す
-    refs = set(re.findall(r"getElementById\(\s*'([a-zA-Z_]+)'\s*\)", page))
-    miss = sorted(refs - ids)
-    if miss:
-        ng(f"JSが触るのにHTMLに無いid: {miss} — 画面が固まります")
-    else:
-        ok(f"JSが触るid({len(refs)}個)はすべてHTMLにある")
+    for pname, psrc in pages.items():
+        ids = set(re.findall(r'id="([a-zA-Z_]+)"', psrc))
+        # getElementById('sel_'+k) のような連結は静的には解決できないので外す
+        refs = set(re.findall(r"getElementById\(\s*'([a-zA-Z_]+)'\s*\)", psrc))
+        miss = sorted(refs - ids)
+        if miss:
+            ng(f"{pname}: JSが触るのにHTMLに無いid: {miss} — 画面が固まります")
+        else:
+            ok(f"{pname}: JSが触るid({len(refs)}個)はすべてHTMLにある")
 
 
 # ---------------------------------------------------------------- 7. 実機側

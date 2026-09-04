@@ -66,6 +66,8 @@ GUARD_NAN_TRIP = 3
 #   この窓の間に出しているのは user_lowcmd のストリームだけで、UserCtrlに
 #   入るまでロボットは無視するので、延ばしても機体は動かない。
 USER_CTRL_CONFIRM_S = 6.0
+# 速度指令(SetVelocity)を受け付ける内蔵歩行のFSM(新FW)。自動歩行・手動操作用
+WALK_FSMS = {500, 501, 801, 802}
 
 
 def _rpc(label, fn, *args, timeout=2.5):
@@ -448,6 +450,52 @@ class RealRobot:
             return -1
         self._use_user_topic = False
         return int(res[0])
+
+    def return_to_balance(self, log=print):
+        """こちらの制御(方策なしの現姿勢PD保持)を**内蔵バランス制御へ返す**。脱力しない。
+
+        UI(スマホ/PC)との通信が途絶えたとき、方策で支えていない状態
+        (=現姿勢PD保持。バランスが無く数秒で倒れる)を内蔵制御に引き取らせる
+        ための経路(2026-09-04)。dampへ落とすと立っている機体が崩れる
+        (実機で転倒事例)。「立っている途中なら、バランスを保ってそこで静止」がこれ。
+
+          UserCtrl経路   : SwitchToInternalCtrl(LAST=0) → 進入前の状態(802 走行=
+                           バランス立位、速度ゼロ)へ戻る。実機実績: 2026-08-26 15:22
+                           往復実証 / 15:44 LAST返却で崩落なし(docs/ポータブル版 09)
+          ReleaseMode経路: SelectMode(ai) → ロック立位(FSM 4)
+
+        ★送信は切替の**後**に止める。先に止めると UserCtrl のまま指令が無い窓が
+          できる。切替後は user_lowcmd が無視されるだけなので、RPC が返ってから
+          止めれば競合しない(rt/lowcmd へ戻る前に必ず止める)。
+        戻り値 (成功か, FSM)
+        """
+        if self._estop_latched:
+            return False, None
+        if self._loco is None:
+            return False, None
+        if self._use_user_topic:
+            import json as _j
+            self._regist_user_apis()
+            ok, res = _rpc("SwitchToInternalCtrl(LAST)", self._loco._Call, 7111,
+                           _j.dumps({"data": 0}), timeout=4.0)
+            code = int(res[0]) if (ok and res is not None) else -1
+            self._stream_on = False                # ← 先に送信を止めてから
+            self.custom_active = False
+            self._use_user_topic = False           #    送信先を rt/lowcmd へ戻す
+            f = None
+            t0 = time.time()
+            while time.time() - t0 < 3.0:
+                f = self.get_fsm_id()
+                if f is not None and f != 1000:
+                    break
+                time.sleep(0.2)
+            good = (f is not None and f != 1000)
+            log(f"内蔵バランス制御へ返却(LAST): code={code} → FSM {f}"
+                f"({time.time() - t0:.1f}秒)" + ("" if good else " ★切り替わっていない"))
+            return good, f
+        good = self.standard_mode("stand")
+        log("内蔵制御へ返却: SelectMode(ai) → ロック立位(4)" + ("" if good else " ★失敗"))
+        return good, (4 if good else None)
 
     def current_mode(self, timeout=2.5):
         """内蔵制御サービスの状態を返す(表示用)。'(解放中)' なら未使用。
@@ -871,6 +919,84 @@ class RealRobot:
         """ウォーキングモード中の速度指令(SDK)"""
         if self._loco is not None:
             _rpc_async("Move", self._loco.Move, vx, vy, omega)
+
+    # ---- 内蔵歩行(自動歩行・スマホ手動操作)の入口(2026-09-04) ------------------
+    def set_velocity(self, vx, vy, om, duration=0.5):
+        """内蔵歩行への速度指令(同期・有限時間)。autowalk.VelSender だけが呼ぶ。
+
+        duration 秒で内蔵側が勝手に止まるので、こちらのプロセスが死んでも
+        機体は暴走しない。応答は0.8秒で打ち切る(送信スレッドの周期を守る)。
+        """
+        if self._loco is None:
+            return False
+        ok, _res = _rpc("SetVelocity", self._loco.SetVelocity, float(vx),
+                        float(vy), float(om), float(duration), timeout=0.8)
+        return bool(ok)
+
+    def yaw(self):
+        """IMUのヨー[rad](LowState)。直進保持と点群の体基準化に使う"""
+        with self.lock:
+            return float(self.rpy[2])
+
+    def open_lidar(self):
+        """rt/utlidar/cloud_livox_mid360 のポーリング読み手(autowalk.LidarReader)"""
+        from unitree_sdk2py.core.channel import ChannelSubscriber
+        from unitree_sdk2py.idl.sensor_msgs.msg.dds_ import PointCloud2_
+        from autowalk import LidarReader
+        sub = ChannelSubscriber("rt/utlidar/cloud_livox_mid360", PointCloud2_)
+        sub.Init(None, 0)                          # ハンドラを付けない(§3)
+        return LidarReader(sub)
+
+    def open_odom(self):
+        """rt/odommodestate のポーリング読み手(autowalk.OdomReader)"""
+        from unitree_sdk2py.core.channel import ChannelSubscriber
+        from unitree_sdk2py.idl.unitree_go.msg.dds_ import SportModeState_
+        from autowalk import OdomReader
+        sub = ChannelSubscriber("rt/odommodestate", SportModeState_)
+        sub.Init(None, 0)
+        return OdomReader(sub)
+
+    def ensure_walk_mode(self, log=print):
+        """内蔵の歩行FSM(802。だめなら501)へ入れる。**ロック立位(4)からだけ**遷移する。
+
+        ダンピング/ゼロトルクからは自動で立ち上げない(立ち上がりは操作者が
+        [立つ]を押して目で見ながら行う)。
+        ★802 は静止していても走行制御が動いている状態。吊った機体を入れると
+          空中で走行動作を始めて暴れる(実機13:58)。**必ず接地させ、リモコンの
+          E-STOPを握って**押すこと。2026-09-03 の実機では 4→802 が0.4秒で通っている。
+        戻り値: (成功か, いまのFSM)
+        """
+        if self.custom_active or self._stream_on:
+            return False, "方策側が制御権を持っています。先に[ダンプ]→[立つ]で内蔵制御へ戻すこと"
+        if self._loco is None:
+            return False, "LocoClient が無い"
+        if not self._select_ai():
+            return False, "制御サービスを復帰できない"
+        f = self.get_fsm_id()
+        if f in WALK_FSMS:
+            return True, f
+        if f != 4:
+            return False, f"FSM={f}: 先に[立つ](ロック立位4)で立たせ、接地を確認してから"
+        log("★FSM 802(走行)へ遷移します — 走行制御が動きます。"
+            "機体を接地させ、リモコンE-STOPを握ってください")
+        _rpc("SetFsmId(802)", self._loco.SetFsmId, 802, timeout=4.0)
+        t0 = time.time()
+        while time.time() - t0 < 6.0:
+            time.sleep(0.4)
+            f = self.get_fsm_id()
+            if f in WALK_FSMS:
+                log(f"FSM {f} に到達({time.time() - t0:.1f}秒)")
+                return True, f
+        log(f"802へ入れなかった(FSM={f})。501(腰3DoF歩行)を試します")
+        _rpc("SetFsmId(501)", self._loco.SetFsmId, 501, timeout=4.0)
+        t0 = time.time()
+        while time.time() - t0 < 5.0:
+            time.sleep(0.4)
+            f = self.get_fsm_id()
+            if f in WALK_FSMS:
+                log(f"FSM {f} に到達({time.time() - t0:.1f}秒)")
+                return True, f
+        return False, f
 
     # ---- 共通API
     def state(self):

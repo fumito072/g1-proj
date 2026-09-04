@@ -75,6 +75,15 @@ class Policy:
         d = DEPLOY / name
         self.name = name
         self.net = torch.jit.load(str(d / "policy.pt")).eval()
+        # ★暖機(2026-09-04): TorchScript の最初の推論はプロファイル実行で 120〜270ms かかる(実機ログ)。
+        #   走行の1コマ目で払わず、読込のここで済ませておく
+        try:
+            _nin = int(json.loads((d / "meta.json").read_text(encoding="utf-8")).get("obs_dim", 615))
+        except Exception:                          # noqa: BLE001
+            _nin = 615
+        with torch.no_grad():
+            for _ in range(4):
+                self.net(torch.zeros(1, _nin))
         # ★zipは読み切って閉じる(遅延読み込みのまま制御ループへ渡さない)。
         #   理由は _Ref のコメントを参照。
         with np.load(d / "reference.npz") as _z:

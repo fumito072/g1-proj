@@ -16,6 +16,7 @@ import argparse
 import gc
 import json
 import pathlib
+import platform
 import sys
 import threading
 import time
@@ -31,6 +32,9 @@ sys.path.insert(0, str(ROOT))
 
 from run_fsm import (Policy, ObsBuilder, quat_to_mat, ACTION_SCALE,   # noqa: E402
                      CONTROL_HZ, TILT_LIMIT_DEG, _yaw_of)
+from autowalk import WalkController                                    # noqa: E402
+from sit_shape import SagittalFK, shape_metrics, describe as shape_describe  # noqa: E402
+import base64                                                          # noqa: E402
 
 DEPLOY = ROOT / "deploy"
 VEL_HARD = 32.0            # 全関節の速度ハード上限[rad/s]
@@ -245,7 +249,18 @@ CMD_ALLOW = (
     "mode_seated",
     "custom", "run_task",
     "assist", "yawalign", "stopframe", "afterphase",         # ← 2026-08-27に入れ忘れていた
+    # 2026-09-04 内蔵歩行: 自動歩行 / スマホ手動操作。tele と walk_stop は
+    # do_POST で**キューを経由せず**直接処理する — 手動操作の遅延と停止の即時性のため。
+    # ★このタプルの中のコメントに丸括弧を書かないこと。preflight 6c の正規表現が
+    #   最初の閉じ括弧で止まり、それ以降の名前を見落とす
+    "walk_ready", "walk_auto", "walk_param", "walk_stop", "tele", "lidar",
+    "legres",                                                # 脚腰の残差スケール。試験用
+    "walk_go", "sit_check", "sit_go", "hbdrop",              # かんたん画面と途絶の模擬
+    "cfade",                                                 # 接触後の膝・足首の残差抜き
 )
+CONTACT_FADE_MIN_T = 85           # 接触後フェードの検知を許す最初のコマ。参照の座面到達1.9秒の少し前
+SEAT_KT_MAX = 18.0                # 完了時: 終端0.5秒の両膝トルク中央値がこれ以上なら「脚に体重が残っている」
+SEAT_BACK_MIN_CM = 3.0            # 完了時: 骨盤の後退がこれ未満なら「座面に載っていない疑い」
 REC_SAVE_EVERY = 100              # 途中で落ちても失わないよう逐次保存
 
 
@@ -404,6 +419,33 @@ class Engine:
         #   前後の釣り合いを担うのは肩ピッチと肘なので、**横方向だけ縮めれば
         #   クロスを直したまま錘を残せる**はず。それが "lat"。
         self.arm_res_mode = "lat"
+        # ★2026-09-04 脚腰(0〜14)の残差スケール(試験用・既定1.0=従来どおり)。
+        #   実機11本(9/3 ln23)とシムの両方で、方策は参照より0.6〜0.9秒早く座面に乗り、
+        #   骨盤が参照の30.5cmに対し13〜28cmしか下がらないまま座るので膝が6〜22cm前へ出る
+        #   (docs/着座_膝と回転の解析_20260904.md)。シム(参照開始)では脚残差0.7で
+        #   後退17→22cm・膝前方16→9cm・ヨー-12.5→-9.6度と改善したが、残差は
+        #   バランスの権限そのものなので、実機開始状態からの試行では0.6で1本転倒した。
+        #   **既定では触らない。** A/Bするなら 0.85 から、ハーネス必須。
+        self.leg_res = 1.0
+        self._fk_shape = None            # 着座の形(sit_shape)のFK。ARM時に作る
+        # ★2026-09-04 座面に乗ったあと、膝・足首の残差を抜いて参照の深い着座姿勢へ寄せる。
+        #   実機11本+シムで、方策は座面に乗った後も膝を曲げ足首を引く残差を出し続け、
+        #   足首〜骨盤の距離が 30→20cm に縮んで浅く座っていた(膝が前に出る)。
+        #   学習シーンのシム(参照開始×3シード): 膝+足首の残差を接触後2秒で0へ →
+        #   後退 23→32cm(参照30.5)・膝前方 14→3cm・膝角 107→91度・尻荷重 223→327N・
+        #   転倒0/3・傾き最大 14→20度。脚腰全部を抜くと傾き最大27度(前傾相が大きく出る)
+        #   なので膝・足首だけにする。旧コックピットの「減衰retarget」(ずれを時間で
+        #   0へ)を接触後に当てた形。docs/着座_膝と回転の解析_20260904.md §3-4
+        #   接触検知は両膝トルクの落ち込み(sit_shape.contact_frame と同じ判定をオンラインで)
+        # ★2026-09-04 午後: 実機で 3/3 崩れた(下降の入口で誤検知→残差が消えてロール33°・ヨー90°)。
+        #   既定は "off"。docs/着座_膝と回転の解析_20260904.md §3-0b
+        self.contact_fade = "off"        # "off"=しない / "0"=残差0へ / "0.3"=0.3まで
+        self._kt_low_n = 0               # 接触判定: 低トルクが続いたコマ数
+        self._seat_doubt = None          # 完了時に「座面に載っていない疑い」なら理由文
+        self.contact_fade_s = 2.0        # 抜くのに掛ける秒数
+        self._contact_t = None           # 接触を検知したコマ(走行ごとにリセット)
+        self._kt_peak = 0.0              # 降下中の両膝トルク合計のピーク
+        self._res_vec = np.ones(29)      # 関節別の残差倍率(接触後に膝・足首が下がる)
         # 1回の走行が終わるたびに要点を1行ぶん積む。UIの[走行の統計]タブが
         # ここを読む。npzを開き直さずに現場でその場で比較できるようにするため。
         # 走らせながらnpzを解析すると制御ループを食う(2026-08-26に19Hzまで
@@ -430,6 +472,16 @@ class Engine:
         #   "damp"=ダンプ / "none"=渡さず方策のPDで姿勢維持(従来)
         # 座り終えた姿勢の引き継ぎ先は **着座(FSM3)**。スクワット(FSM2)は
         # 立位でしゃがむモードなので、座った状態から立ち上がろうとしうる。
+        # ★2026-09-04 既定を "seated" → "damp" に変更。理由:
+        #   - 走行ログ(logs/real 全セッション)に FSM3 への自動移行の実績が1本も無い。
+        #     9/3 の全完走回は操作者が 1〜10秒後に手で[ダンプ]を押しており、
+        #     椅子に座った姿勢からのダンプは**実機で繰り返し通っている経路**
+        #   - 別系統の実機記録(docs/ポータブル版_設計メモ/06 §6.2)では FSM3 は
+        #     「床へ倒れ込む着座」で、1.1秒でピッチ −2度 → −27度。椅子の上で
+        #     これを掛けると椅子から滑り落ちうる。未検証の経路を既定にしない
+        #   FSM3 は選択肢として残す(実機で安全に試せたら既定へ戻す)
+        # ★2026-09-04 午後: 既定を元の "seated"(内蔵の着座 FSM3)へ戻した。9/3 14:20〜14:52 の 8 本が
+        #   FSM3 自動移行で運用されて問題なし(逆に "damp" は浅く座った機体を前へ崩す)
         self.after_phase = "seated"
         self.obs_b = None
         self.log_dir = None
@@ -453,6 +505,25 @@ class Engine:
         self._estop_pending = None       # estop_now が立てる。ループが後始末
         self._last_beat = None              # UIハートビートの最終受信時刻(未受信=None)
         self._heartbeat_sec = heartbeat_sec # 0で無効
+        # --- 通信途絶(UIハートビート)への対応(★2026-09-04 改訂)
+        #   旧: 途絶8秒で一律 DAMP(kp=0)。立っている機体・座る途中の機体が突然崩れて
+        #       転倒した(実機)。ネットワークは安全経路ではないのに、切れた瞬間に
+        #       最も危険な操作(脱力)をしていた。
+        #   新: 状態で分ける(_ui_loss_plan)。damp にはしない。
+        #       方策の実行中(RUNNING)      → 最後まで実行し、完了後は方策で姿勢を保持
+        #       方策で保持中(HOLD等)      → そのまま(完了後の自動移行もしない)
+        #       方策なしのPD保持(制御権だけ・補間中・立位待機) → 内蔵バランス制御へ返して静止
+        #       内蔵歩行(WALK:*)          → 速度ゼロ(autowalk側)。内蔵バランスで静止
+        #       内蔵制御中(STD:*)         → 何もしない
+        #   物理の異常(傾き40度・関節速度・LowState断・送信断)は従来どおり即DAMP。
+        self._ui_lost = False
+        self._ui_lost_t = 0.0
+        self._ui_lost_what = ""
+        self._ui_lost_last = None           # 直近の途絶イベント(UI表示用)
+        self._ui_note_t = 0.0
+        self._ui_action_t = 0.0
+        self._beat_ignore_until = 0.0       # 途絶の模擬(hbdrop。シムでの手順確認用)
+        self.sit_gate = None                # 着座前の確認(sit_check)の結果とトークン
         self._want_arm = False           # ワーカーの準備物をループが取り込む
         self._armed_bundle = None
         self._want_begin = None          # 開始するフェーズ番号
@@ -474,6 +545,14 @@ class Engine:
         self._save_n = 0
         self._save_ms = 0.0
         self._closing = False
+        # 内蔵歩行(自動歩行・スマホ手動操作)。方策(lowcmd)とは独立の経路で、
+        # 内蔵の歩行FSMに SetVelocity を送るだけ。詳細は autowalk.py
+        self.walk = WalkController(robot, log=self.log, hb_ok=self._hb_ok,
+                                   is_sim=is_sim)
+        # ★LiDAR/オドメトリは実機では起動時から読む(2026-09-04 操作者の指示: 自動ON)。
+        #   方策の実行中(RUNNING)だけ止め、終わったら再開する(_begin_phase/_end_phase)
+        if not is_sim:
+            self.walk.enable_sensors(True)
         threading.Thread(target=self._saver, daemon=True, name="saver").start()
         self._th = threading.Thread(target=self._loop, daemon=True,
                                     name="fsm50hz")
@@ -506,7 +585,16 @@ class Engine:
 
     def beat(self):
         """UIからのハートビート。HTTPスレッドから直接呼ぶ(キューを経由しない)。"""
-        self._last_beat = time.time()
+        now = time.time()
+        if now < self._beat_ignore_until:
+            return                                 # 途絶の模擬中(hbdrop)
+        if self._ui_lost:
+            dur = now - self._ui_lost_t
+            self._ui_lost = False
+            self._ui_lost_last = {"t": time.strftime("%H:%M:%S"), "dur": round(dur, 1),
+                                  "what": self._ui_lost_what}
+            self.log(f"UI(通信)復帰: 途絶 {dur:.1f}秒。途絶中の対応: {self._ui_lost_what}")
+        self._last_beat = now
 
     def _pop(self):
         with self.lock:
@@ -540,7 +628,11 @@ class Engine:
           通信断の監視が要る(2026-08-26レビュー指摘)。
           標準モード中(STD:*)は内蔵制御が持っているので監視しない。
         """
-        if self.fsm.startswith("STD:") or self.fsm == "DAMP":
+        if (self.fsm.startswith("STD:") or self.fsm.startswith("WALK:")
+                or self.fsm == "DAMP"):
+            # WALK:* は内蔵歩行(自動歩行・手動操作)。内蔵バランスが支えている。
+            # 歩行中に傾きでdampすると倒れるので、ここでは監視しない
+            # (自動歩行側は傾き25度・途絶・ハートビートで**速度ゼロ**にする)
             return False
         if self.fsm in ("MOVING", "RUNNING", "HOLD", "WAIT_CONFIRM"):
             return True
@@ -556,17 +648,77 @@ class Engine:
         while not self._closing:
             time.sleep(0.01)
             try:
-                if not self._monitoring():
-                    continue
-                why = self._safety()
-                if why:
-                    self.estop_now(why)
-                    continue
+                if self._monitoring():
+                    why = self._safety()
+                    if why:
+                        self.estop_now(why)
+                        continue
+                # ★UIハートビートの途絶は DAMP しない(2026-09-04)。状態に応じて
+                #   「続ける / 保持する / 内蔵バランスへ返す」(_on_ui_lost)。
                 if (self._heartbeat_sec > 0 and self._last_beat is not None
                         and time.time() - self._last_beat > self._heartbeat_sec):
-                    self.estop_now("UIハートビート途絶")
+                    self._on_ui_lost()
             except Exception:                      # noqa: BLE001
                 pass
+
+    # ---------------- 通信途絶(UIハートビート)の扱い ★2026-09-04
+    def _ui_loss_plan(self):
+        """いまの状態で通信が切れたら何をするか(表示・ログ用の文)"""
+        if self.fsm == "RUNNING":
+            return "動作(方策)を最後まで実行し、完了後は方策で姿勢を保持(dampしない)"
+        if self.fsm in ("HOLD", "WAIT_CONFIRM") and self.hold_pol is not None:
+            return "方策で姿勢を保持したまま静止(完了後の自動移行もしない)"
+        if self.fsm.startswith("WALK:"):
+            return "歩行を止め(速度ゼロ)、内蔵バランスで静止"
+        if self.fsm.startswith("STD:") or self.fsm == "DAMP":
+            return "内蔵制御のまま(何もしない)"
+        if getattr(self.robot, "custom_active", False):
+            return "内蔵バランス制御へ返して静止(方策なしのPD保持は数秒で倒れるため。dampはしない)"
+        return "何もしない(制御権を持っていない)"
+
+    def _on_ui_lost(self):
+        """ハートビート途絶中、監視スレッドから100Hzで呼ばれる(冪等)"""
+        now = time.time()
+        if not self._ui_lost:
+            self._ui_lost = True
+            self._ui_lost_t = now
+            self._ui_lost_what = self._ui_loss_plan()
+            self._ui_note_t = now
+            self.log(f"★UI(通信)途絶 {self._heartbeat_sec:.0f}秒: {self._ui_lost_what}")
+        if (self.fsm == "RUNNING" or self.fsm.startswith("STD:") or self.fsm == "DAMP"
+                or self.fsm.startswith("WALK:")):
+            return                                 # 続ける / 内蔵制御 / 自動歩行は自分で止まる
+        if self.fsm in ("HOLD", "WAIT_CONFIRM") and self.hold_pol is not None:
+            if now - self._ui_note_t > 30.0:       # 保持が長引くときは温度を残す
+                self._ui_note_t = now
+                tp = np.asarray(getattr(self.robot, "temps", np.zeros(29)))
+                self.log(f"UI途絶のまま方策で姿勢維持中({now - self._ui_lost_t:.0f}秒)"
+                         f" 温度 最大{tp.max():.0f}度")
+            return
+        # ここから: 方策なしのPD保持(IDLE / MOVING / 立位待機)で制御権を持っている
+        if getattr(self.robot, "custom_active", False) and now - self._ui_action_t > 3.0:
+            self._ui_action_t = now
+            self._spawn("UI途絶→内蔵バランスへ", self._do_return_to_balance)
+
+    def _do_return_to_balance(self):
+        """方策なしのPD保持を内蔵バランス制御へ返す(ワーカー。RPCを含む)"""
+        self.interp = None
+        self._want_begin = None
+        self._interp_then = "begin"
+        self.hold_pol = None
+        self.hold_t = None
+        self.fsm = "IDLE"
+        if not getattr(self.robot, "custom_active", False):
+            return
+        ok, f = self.robot.return_to_balance(log=self.log)
+        self.armed = False
+        if ok:
+            self.fsm = "STD:balance"
+            self.log(f"内蔵バランス制御で静止しています(FSM {f})。"
+                     f"UIが戻ったら[立つ]/[ダンプ]などで続けてください")
+        else:
+            self.log("★内蔵制御へ返せませんでした — 現姿勢のPD保持を続けます(バランス無し)。"
+                     "リモコンの L2+UP(ロック立位) か L2+B(ダンピング) で引き取ってください")
 
     # ---------------- 緊急停止(★キューに載せない)
     def estop_now(self, why):
@@ -588,6 +740,9 @@ class Engine:
             self._estop_pending = why
             self.cmd_q = []                        # 溜まった操作は全部捨てる
         self.robot.estop(why)                      # ← ここで実際に止まる
+        w = getattr(self, "walk", None)
+        if w is not None:
+            w.stop(f"E-STOP: {why}")               # 歩行の速度指令もゼロへ
         self.fsm = "DAMP"
         self.armed = False
         self.log(f"★DAMP: {why}")
@@ -852,6 +1007,209 @@ class Engine:
         self._want_arm = True
         self.log("★UserCtrl取得 → 待たずに方策を開始します(静的保持を挟まない)")
 
+    # ---------------- 内蔵歩行(自動歩行 / スマホ手動操作) 2026-09-04
+    def _hb_ok(self):
+        """UIハートビートが生きているか(自動歩行の継続条件)。未接続=True"""
+        return (self._heartbeat_sec <= 0 or self._last_beat is None
+                or time.time() - self._last_beat < self._heartbeat_sec)
+
+    def _do_walk_ready(self):
+        """[歩行モードへ]: ロック立位(4)→走行(802)へ遷移し、LiDAR/オドメトリの
+        読み取りを始める。方策の制御権を持ったままでは入らない。"""
+        if self.fsm in ("RUNNING", "MOVING") or getattr(self.robot, "custom_active", False):
+            self.log("★方策が制御権を持っています。先に[ダンプ]→[立つ]で"
+                     "内蔵制御へ戻してください")
+            return
+        self._clear_estop("歩行モードへ")
+        # 歩行の記録先。イベント.log にも歩行の操作・結果を残す(方策を一度も
+        # ARM していないセッションでは log_dir が無く、イベントが紙に残らなかった)
+        self.walk.log_dir = self._session_dir()
+        if self.log_dir is None:
+            self.log_dir = self.walk.log_dir
+        if self.walk.prepare():
+            self.fsm = "WALK:ready"
+            self.sim_frozen = False
+            self._fsm_id = self.walk.fsm_id
+        else:
+            self.fsm = "IDLE"
+
+    def _do_walk_auto(self):
+        if self.fsm not in ("WALK:ready", "WALK:auto") or not self.walk.ready:
+            self.log("★先に[歩行モードへ]を押してください")
+            return
+        if self.walk.start_auto():
+            self.fsm = "WALK:auto"
+
+    def _set_walk_params(self, arg):
+        try:
+            d = json.loads(arg) if arg else {}
+        except Exception:                          # noqa: BLE001
+            self.log(f"★歩行パラメータが不正: {arg}")
+            return
+        ch = self.walk.set_params(d)
+        if ch:
+            self.log("歩行パラメータ: " + " ".join(ch))
+
+    def walk_stop(self, why="停止"):
+        """歩行の速度をゼロにする(dampではない)。HTTPスレッドから直接呼ばれる"""
+        self.walk.stop(why)
+        if self.fsm == "WALK:auto":
+            self.fsm = "WALK:ready"
+        self.log(f"歩行停止(速度ゼロ): {why}")
+
+    def tele(self, arg):
+        """スマホ十字キー。arg='vx,vy,om'。0.5秒更新が無ければ自動停止"""
+        try:
+            vx, vy, om = [float(x) for x in str(arg).split(",")]
+        except Exception:                          # noqa: BLE001
+            return False
+        return self.walk.tele(vx, vy, om)
+
+    def _do_walk_go(self, arg):
+        """かんたん画面の[前進][横歩き][5cm]。arg=JSON {mode, stop_dist, side_dir, side_dist, avoid}"""
+        try:
+            d = json.loads(arg) if arg else {}
+        except Exception:                          # noqa: BLE001
+            self.log(f"★歩行の指定が不正: {arg}")
+            return
+        if self.fsm not in ("WALK:ready", "WALK:auto") or not self.walk.ready:
+            self.log("★先に[歩行モード]を押してください(ロック立位から走行802へ入れます)")
+            return
+        mode = d.get("mode", "forward")
+        keep = {k: v for k, v in d.items() if k in ("stop_dist", "side_dir", "side_dist",
+                                                    "avoid", "v_fwd", "dry_run", "step_v")}
+        if d.get("nudge"):                         # 5cm の微調整は設定を汚さない
+            keep.pop("side_dist", None)
+            keep.pop("side_dir", None)
+        ch = self.walk.set_params(keep)
+        if ch:
+            self.log("歩行パラメータ: " + " ".join(ch))
+        ov = {"mode": mode}
+        if mode == "step":                         # [1歩] ボタン: 向きだけ
+            ov["step_dir"] = str(d.get("dir", "left"))
+        elif d.get("nudge") and mode == "back":
+            ov["back_dist"] = float(d.get("back_dist", 0.05))
+        elif d.get("nudge"):
+            ov["side_dir"] = d.get("side_dir", "left")
+            ov["side_dist"] = float(d.get("side_dist", 0.05))
+        if self.walk.start_auto(ov):
+            self.fsm = "WALK:auto"
+
+    def _clock_check(self):
+        """Jetson の CPU クロックが最大に固定されているか(実機のみ)。[ok, 文] / 判定不能は None"""
+        if self.is_sim or platform.machine() != "aarch64":
+            return None
+        try:
+            mn = int(open("/sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq").read()) // 1000
+            mx = int(open("/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq").read()) // 1000
+        except Exception:                          # noqa: BLE001
+            return None
+        if mn >= 1500 and mx >= 1500:
+            return [True, f"CPUクロック固定 {mn}MHz(推論が遅くならない)"]
+        return [False, f"CPUクロックが固定されていない(min {mn}MHz / max {mx}MHz) — 機体で sudo jetson_clocks "
+                       "を実行(自動起動なら再起動で直る)。このままだと 0.2秒で制御周期ガードが働き前へ倒れる"]
+
+    def _do_sit_check(self):
+        """[着座(確認へ)]: この位置で座ってよいかを**サーバ側で**点検する。
+
+        結果は sit_gate に入り、30秒以内に同じトークンで sit_go が来たときだけ
+        着座を始める(ブラウザ側の確認だけに頼らない)。
+        NG(×)が1つでもあれば始めない。△は注意(操作者の判断)。
+        """
+        items = []
+        g = self._go_check()
+        for s in g["ng"]:
+            if s.startswith("処理中(着座前の確認"):   # この確認自身のワーカーは除く
+                continue
+            items.append([False, s])
+        # ★2026-09-04 12:36: 再起動後に CPU が 729MHz のままで推論が 4〜5 倍遅くなり、0.2 秒で
+        #   制御周期ガードがダンプ→立位のまま前へ倒れた。クロック固定(jetson_clocks)を毎回点検する
+        ck = self._clock_check()
+        if ck is not None:
+            items.append(ck)
+        for s in g["warn"]:
+            items.append([None, s])
+        q, dq, quat, gyro, tau = self.robot.state()
+        up_z = float(quat_to_mat(quat)[2, 2])
+        tilt = float(np.degrees(np.arccos(min(1.0, max(-1.0, up_z)))))
+        items.append([tilt < 10.0, f"傾き {tilt:.1f}度(10度未満)"])
+        rms = float(np.sqrt(np.mean(dq ** 2)))
+        items.append([rms < 0.10, f"静止(関節速度RMS {rms:.3f}、0.10未満)"])
+        f = self.robot.get_fsm_id() if hasattr(self.robot, "get_fsm_id") else None
+        self._fsm_id = f
+        items.append([(f is None) or (f in (4, 500, 501, 801, 802, 1000)),
+                      f"内蔵FSM {f}(立位/歩行/UserCtrlのどれか)" if f is not None
+                      else "内蔵FSM 読めず(simなど)"])
+        ye = self._yaw_err_deg()
+        items.append([None, f"参照との向きのずれ {ye if ye is not None else '-'}度"
+                      f"(開始時に自動で合わせる。椅子が真後ろかは目視)"])
+        w = self.walk.status()
+        if w["sensors"] and w["lidar_age_ms"] is not None and w["lidar_age_ms"] < 1500:
+            if w["rear_dist"] is not None:
+                items.append([None, f"LiDAR: 後方{w['rear_dist'] * 100:.0f}cmに高さ"
+                                    f"{w['rear_h'] * 100:.0f}cmの面(座面?)。参照は踵の2cm後ろから座面"])
+            else:
+                items.append([None, "LiDAR: 後方に座面らしい面は見えない"
+                                    "(頭のLiDARは後ろ下が死角。無いとは言えない)"])
+        else:
+            items.append([None, "LiDAR未使用 — 椅子の位置は目視で確認"])
+        cr = self._crouch_deg(q)
+        if cr is not None:
+            items.append([None, f"しゃがみ深さ {cr:.0f}度(65度未満なら成功率61%)"])
+        ok = all(it[0] is not False for it in items)
+        import random
+        token = f"{int(time.time())}-{random.randint(1000, 9999)}"
+        self.sit_gate = dict(ok=ok, items=items, token=token, t=time.time(),
+                             pattern=self.sel["sit"])
+        self.log("着座前の確認: " + ("OK(操作者の確認へ)" if ok else "★NGあり") + " / "
+                 + " / ".join(("○" if it[0] else ("×" if it[0] is False else "△")) + it[1]
+                              for it in items))
+
+    def _do_sit_go(self, arg):
+        """確認済みトークンで着座を始める(50Hzループから。実行本体はワーカー)"""
+        g = self.sit_gate
+        if g is None or not arg or arg != g["token"]:
+            self.log("★着座の確認が無い/古い。もう一度[着座(確認)]から")
+            return
+        if time.time() - g["t"] > 30.0:
+            self.sit_gate = None
+            self.log("★確認から30秒以上経ちました。もう一度[着座(確認)]から")
+            return
+        if not g["ok"]:
+            self.log("★確認でNGがあるので始めません")
+            return
+        if self.sel["sit"] != g["pattern"]:
+            self.sit_gate = None
+            self.log("★確認後に方策が変わりました。もう一度[着座(確認)]から")
+            return
+        self.sit_gate = None
+        self.log("着座を開始します(確認済み)")
+        if hasattr(self.robot, "enter_user_ctrl"):
+            self._spawn("UserCtrl→sit", lambda: self._do_user_run("sit"))
+        else:
+            self._spawn("単体実行 sit", lambda: self._do_run_task("sit"))
+
+    def _seat_check(self, name):
+        """完了時に座面に載っているかの証拠を見る。疑いがあれば理由文、無ければ None。
+        証拠 = 終端0.5秒の両膝トルク中央値が小さい(体重が脚に残っていない)+ 骨盤の後退(sit_shape)。"""
+        if not name.startswith("sit"):
+            return None
+        why = []
+        try:
+            rows = self._rec_rows[-25:]
+            if len(rows) >= 5:
+                i3, i9 = REC_COLS.index("tau3"), REC_COLS.index("tau9")
+                kt = float(np.median([abs(r[i3]) + abs(r[i9]) for r in rows]))
+                if kt >= SEAT_KT_MAX:
+                    why.append(f"終端の膝τ合計 {kt:.0f}N·m(脚に体重。座れた回は5〜14)")
+            st = self.run_stats[-1] if self.run_stats else {}
+            be = st.get("backe")
+            if be is not None and float(be) < SEAT_BACK_MIN_CM:
+                why.append(f"骨盤の後退 {float(be):+.0f}cm(座れた回は+8〜+28)")
+        except Exception:                          # noqa: BLE001
+            return None if not why else " / ".join(why)
+        return " / ".join(why) if why else None
+
     def _do_after_phase(self, name):
         """方策の完了後に標準モードへ渡す(2026-09-03)。
 
@@ -865,15 +1223,38 @@ class Engine:
         if self.fsm != "HOLD":                     # その間に操作者が介入した
             self.log("完了後の自動移行: 状態が変わったので中止しました")
             return
+        if self._ui_lost or not self._hb_ok():
+            # ★操作者が見ていない状態で内蔵制御へ渡さない。方策の保持が最も安全
+            self.log("UI(通信)途絶中のため、完了後の自動移行は行いません — "
+                     "方策で姿勢を保持し続けます(UIが戻ったら手動で)")
+            return
         self._do_standard(name)
 
     def _do_standard(self, name):
         self.armed = False
         self.sim_frozen = False
+        # 歩行(自動/手動)は止め、歩行FSMの前提(ready)も下ろす。
+        # センサ読み取りは止めない(立位で距離表示を見たいことがある)
+        self.walk.stop(f"標準モード {name}")
+        self.walk.ready = False
         self._clear_estop(f"標準モード {name}")
         ok = self.robot.standard_mode(name)
         self.fsm = f"STD:{name}" if ok else "DAMP"
         self.log(f"標準モード {name}" + ("" if ok else "(失敗→要確認)"))
+        if ok and self.is_sim and name == "stand":
+            # ★シムの手順練習: [スタンドロック]で、選択中の着座方策の参照開始位置
+            #   (段の上・椅子の前・参照の立位)に置く。実機では内蔵制御が立たせる
+            #   ので何もしない。かんたん画面の [スタンドロック]→[着座の確認]→着座 を
+            #   シムで通すため(2026-09-04)
+            try:
+                name_sit = self.sel.get("sit", "(skip)")
+                if name_sit != "(skip)":
+                    with np.load(DEPLOY / name_sit / "reference.npz") as z:
+                        self.robot.place(z["ref_q"][0], z["ref_quat"][0],
+                                         z["ref_xy_abs"][0][:2], float(z["ref_z"][0]))
+                    self.log(f"(sim) {name_sit} の参照開始位置に立位で配置しました")
+            except Exception as e:                 # noqa: BLE001
+                self.log(f"(sim) 参照開始位置への配置に失敗: {e}")
 
     def _do_start(self):
         pol = self.phases[0][1]
@@ -1103,6 +1484,10 @@ class Engine:
         # --- E-STOPの後始末(止めること自体は estop_now が済ませてある)
         if self._estop_pending:
             self._estop_bookkeeping()
+        # --- 自動歩行が終わったら歩行待機へ戻す(結果は autowalk がログ済み)
+        if self.fsm == "WALK:auto" and (self.walk.auto is None
+                                        or self.walk.auto.done):
+            self.fsm = "WALK:ready"
         # --- ワーカーが用意した方策/ログ先をここでまとめて差し替える
         if self._want_arm:
             b, self._armed_bundle, self._want_arm = self._armed_bundle, None, False
@@ -1173,6 +1558,24 @@ class Engine:
                             + ("(完全に参照どおり)" if self.arm_res <= 0.001 else "")))
             except Exception:                      # noqa: BLE001
                 self.log(f"★腕の残差スケールが不正: {arg}")
+        elif cmd == "cfade":
+            if arg in ("off", "0", "0.3"):
+                self.contact_fade = arg
+                self.log("接触後の膝・足首の残差: " + {
+                    "off": "抜かない(従来どおり。浅く座る)",
+                    "0": "★2秒で0へ抜く(既定。シムで後退23→32cm)",
+                    "0.3": "2秒で0.3まで抜く(控えめ。シムで30cm・傾き最大14度)"}[arg])
+            else:
+                self.log(f"★接触後の残差の指定が不正: {arg}")
+        elif cmd == "legres":
+            try:
+                self.leg_res = max(0.6, min(1.0, float(arg)))
+                self.log(f"★脚腰の残差スケール(試験用): {self.leg_res:.2f}"
+                         + ("(従来どおり)" if self.leg_res >= 0.999 else
+                            " — 方策のバランス権限を縮めます。ハーネス必須・"
+                            "実機未検証。docs/着座_膝と回転の解析_20260904.md"))
+            except Exception:                      # noqa: BLE001
+                self.log(f"★脚腰の残差スケールが不正: {arg}")
         elif cmd == "stopframe":
             try:
                 self.stop_frame = max(0, int(float(arg)))
@@ -1222,6 +1625,36 @@ class Engine:
             self._spawn("START", self._do_start)
         elif cmd == "next" and self.fsm == "WAIT_CONFIRM":
             self._begin_phase()
+        elif cmd == "walk_ready":
+            self._spawn("歩行モードへ", self._do_walk_ready)
+        elif cmd == "walk_auto":
+            self._spawn("自動歩行 開始", self._do_walk_auto)
+        elif cmd == "walk_param":
+            self._set_walk_params(arg)
+        elif cmd == "walk_stop":                   # 通常は do_POST が直接処理
+            self.walk_stop(arg or "操作者による停止")
+        elif cmd == "tele":                        # 通常は do_POST が直接処理
+            self.tele(arg)
+        elif cmd == "lidar":
+            on = (arg == "on")
+            self.walk.enable_sensors(on)
+            self.log("LiDAR/オドメトリの読み取り: " + ("開始" if on else "停止"))
+        elif cmd == "walk_go":                     # かんたん画面: 前進 / 横歩き / 5cm
+            self._spawn("歩行 開始", lambda a=arg: self._do_walk_go(a))
+        elif cmd == "sit_check":                   # かんたん画面: 着座前の確認
+            self._spawn("着座前の確認", self._do_sit_check)
+        elif cmd == "sit_go":
+            self._do_sit_go(arg)
+        elif cmd == "hbdrop":                      # 通信途絶の模擬(シムでの手順確認用)
+            try:
+                secs = max(1.0, min(120.0, float(arg or 20)))
+            except Exception:                      # noqa: BLE001
+                secs = 20.0
+            self._beat_ignore_until = time.time() + secs
+            if self._last_beat is not None:
+                self._last_beat = min(self._last_beat,
+                                      time.time() - self._heartbeat_sec - 0.5)
+            self.log(f"★通信途絶を模擬します({secs:.0f}秒間 ハートビートを無視)")
         elif cmd and cmd.startswith("mode_"):
             # 標準モード(SDK): zero/damp/stand/walk。方策実行は中断
             name = cmd[5:]
@@ -1287,7 +1720,12 @@ class Engine:
                              f"★保持中はバランスがありません — "
                              f"支えたまま速やかに [▶ 単体実行] を押すこと")
                     return
-                if self.step_mode and self.stand is not None:
+                if self._ui_lost:
+                    # ★通信途絶中に方策を勝手に始めない。監視スレッドが
+                    #   内蔵バランスへ返す(_on_ui_lost)まで現姿勢を保持
+                    self.fsm = "IDLE"
+                    self.log("補間完了。UI途絶中なので方策は始めず、内蔵バランスへ返します")
+                elif self.step_mode and self.stand is not None:
                     self.fsm = "WAIT_CONFIRM"
                     if self.is_sim:
                         self.sim_frozen = True
@@ -1325,7 +1763,11 @@ class Engine:
             #   周期が遅いときほど小さく出て一度も発火しなかった。
             #   2026-08-26 12:04 の転倒(実測33Hz)で発火しなかったのがこれ。
             recent = self._loop_hist[-LOOP_DT_WINDOW:]
-            if self.t > LOOP_DT_WINDOW and len(recent) >= LOOP_DT_WINDOW:
+            # ★simモックは論理時間(tick)で物理が進むので、壁時計のループ周期が遅くても
+            #   スローモーションにはならない。この周期ガードは実機だけに掛ける
+            #   (遅いPCでシムの手順確認が周期ガードで中断されないように。2026-09-04)
+            if (not self.is_sim and self.t > LOOP_DT_WINDOW
+                    and len(recent) >= LOOP_DT_WINDOW):
                 med = float(np.median(recent))
                 if med > LOOP_DT_MAX_MS:
                     self.estop_now(
@@ -1358,7 +1800,8 @@ class Engine:
             #   ln20系は腕0.2/脚腰0.7が参照npzに同梱されている。
             #   UIの[腕の残差]は、それに**さらに掛ける**補正として働く
             #   (既定1.00なら方策の指定どおり)。
-            target = ref_eff + self._scale_arm(a) * pol.action_scale * w
+            self._contact_update(name, self.t, tau)
+            target = ref_eff + self._scale_res(a) * pol.action_scale * w
             if self.t == 0:
                 jm = np.abs(target[:15] - q[:15])
                 j = int(jm.argmax())
@@ -1395,7 +1838,7 @@ class Engine:
                 return
             self._nan_frames = 0
             self.obs_b.last_cmd = a.copy()
-            self._set_target(pol.ref_q[ht] + self._scale_arm(a) * pol.action_scale,
+            self._set_target(pol.ref_q[ht] + self._scale_res(a) * pol.action_scale,
                              pol.kp, pol.kd)
         # simモックは論理時間で進める(壁時計非依存。実機は実時間)
         if self.is_sim and not getattr(self, "sim_frozen", False):
@@ -1424,15 +1867,17 @@ class Engine:
         #     コックピットは推論していないので50Hz出てしまう)。
         #     電源は走る前に分かるので、ここで止める。
         pw = self._power_state()
-        if pw.get("ac") == 0:
+        if pw.get("ac") == 0 and not self.is_sim:
             ng.append("★ACアダプタが抜けています — バッテリー駆動では"
                       f"CPUが{pw.get('mhz', 0):.0f}MHzまでしか上がらず、"
                       "制御ループが19〜22Hzに落ちて必ず前に倒れます"
                       "(2026-08-26/27に計5本の転倒実績)")
-        elif pw.get("mhz") and pw["mhz"] < 2500:
+        elif pw.get("mhz") and pw["mhz"] < 2500 and platform.machine() == "x86_64":
             # 最大コアが2.5GHzに届かない = 本当に上がっていない。
             # ★ただしこれは「いま何も走っていない」ときも起こりうる。
             #   走行中の実測は制御周期(dt_ms)で見ること
+            # ★機体(Jetson, aarch64)は最大2GHz級・schedutilで暇なときは730MHzまで
+            #   落ちるのが正常なので、この警告はノートPC(x86_64)だけに出す(2026-09-04)
             warn.append(f"CPUの最大コアが{pw['mhz']:.0f}MHzまでしか"
                         f"上がっていない — ガバナ={pw.get('gov', '?')} / "
                         f"power-profiles-daemon を疑う")
@@ -1442,11 +1887,13 @@ class Engine:
             ng.append(f"処理中({self.busy_what})")
         if self.fsm in ("RUNNING", "MOVING"):
             ng.append(f"実行中({self.fsm})")
+        if self.walk.auto is not None and not self.walk.auto.done:
+            ng.append("自動歩行の実行中 — 先に[歩行停止]")
         if h.get("estop_latched"):
             ng.append("E-STOPラッチ中 — [⤓ 開始姿勢へ]で解除")
         if not self.robot.healthy():
             ng.append("受信途絶または送信停止")
-        if lp["hz"] and lp["hz"] < 45.0:
+        if lp["hz"] and lp["hz"] < 45.0 and not self.is_sim:
             ng.append(f"制御ループ {lp['hz']:.0f}Hz(45Hz未満) "
                       f"— 電源アダプタとCPUガバナを確認")
         q, dq, quat, gyro, tau = self.robot.state()
@@ -1570,12 +2017,52 @@ class Engine:
             return None
 
     def _scale_arm(self, a):
-        """方策出力の腕成分だけを縮めた配列を返す。脚腰(0〜14)は絶対に触らない。"""
-        if self.arm_res >= 0.999:
+        """方策出力の腕成分を縮めた配列を返す。
+
+        脚腰(0〜14)は**既定では触らない**(leg_res=1.0)。leg_res<1 は 2026-09-04 の
+        試験用オプションで、操作者が詳細設定から明示的に選んだときだけ効く。
+        """
+        if self.arm_res >= 0.999 and self.leg_res >= 0.999:
             return a
-        idx = (self.ARM_LAT if self.arm_res_mode == "lat" else self.ARM_ALL)
         out = a.copy()
-        out[list(idx)] *= self.arm_res
+        if self.arm_res < 0.999:
+            idx = (self.ARM_LAT if self.arm_res_mode == "lat" else self.ARM_ALL)
+            out[list(idx)] *= self.arm_res
+        if self.leg_res < 0.999:
+            out[:15] *= self.leg_res
+        return out
+
+    CONTACT_FADE_JOINTS = (3, 4, 5, 9, 10, 11)     # 左右の 膝・足首ピッチ・足首ロール
+
+    def _contact_update(self, name, t, tau):
+        """座面接触の検知と、接触後の膝・足首の残差倍率(_res_vec)の更新。RUNNINGで毎コマ呼ぶ"""
+        if not name.startswith("sit") or self.contact_fade == "off":
+            return
+        kt = float(abs(tau[3]) + abs(tau[9]))
+        if 25 <= t < 100:
+            self._kt_peak = max(self._kt_peak, kt)
+        if self._contact_t is None:
+            # ★実機の膝トルクは下降の入口(0.5〜1.0秒)で符号が変わる途中にゼロ付近を通る。
+            #   参照の座面到達(1.9秒)より前では検知せず、低トルクが10コマ続いたときだけ検知する
+            low = (t >= CONTACT_FADE_MIN_T and self._kt_peak > 8.0 and kt < 0.4 * self._kt_peak)
+            self._kt_low_n = self._kt_low_n + 1 if low else 0
+            if self._kt_low_n >= 10:
+                self._contact_t = t
+                floor = float(self.contact_fade)
+                self.log(f"座面接触を検知({t / CONTROL_HZ:.2f}秒、膝τ {kt:.1f}N·m<ピーク"
+                         f"{self._kt_peak:.1f}の40%) → 膝・足首の残差を"
+                         f"{self.contact_fade_s:.1f}秒で{floor:.1f}へ抜きます(深く座るため)")
+            return
+        floor = float(self.contact_fade)
+        n = max(1, int(self.contact_fade_s * CONTROL_HZ))
+        f = max(floor, 1.0 - (t - self._contact_t) / n * (1.0 - floor))
+        self._res_vec[list(self.CONTACT_FADE_JOINTS)] = f
+
+    def _scale_res(self, a):
+        """腕の縮小(_scale_arm)に加え、接触後の膝・足首の倍率を掛ける"""
+        out = self._scale_arm(a)
+        if float(self._res_vec.min()) < 0.999:
+            out = out * self._res_vec
         return out
 
     def _pose_rows(self, q):
@@ -1688,6 +2175,17 @@ class Engine:
         self._early_track_j = ""
         self._dt_hist = []
         self._dt_ms = 0.0
+        self._contact_t = None                     # 接触後の残差抜きを走行ごとに初期化
+        self._kt_low_n = 0
+        self._seat_doubt = None
+        self._kt_peak = 0.0
+        self._res_vec = np.ones(29)
+        # ★方策の走行中は LiDAR/オドメトリの読み取りを止める(機体ではGILの
+        #   取り合いが制御周期に直接効く。docs/オンボード運用.md §3)。
+        #   自動歩行が動いていたら速度ゼロにしてから方策へ
+        self.walk.stop("方策開始")
+        self.walk.ready = False
+        self.walk.enable_sensors(False)
         self._start_pose_err = emax
         self._start_pose_worst = worst
         # ★参照ブレンドの起点。いまの姿勢から参照へ滑り込ませる
@@ -1781,6 +2279,9 @@ class Engine:
             "after_phase": self.after_phase,
             "arm_res": float(self.arm_res),
             "arm_res_mode": self.arm_res_mode,
+            "leg_res": float(self.leg_res),
+            "contact_fade": self.contact_fade,
+            "contact_fade_s": float(self.contact_fade_s),
         }
         try:
             (self.log_dir / f"run{self.run_i:03d}_設定.json").write_text(
@@ -1864,6 +2365,32 @@ class Engine:
             dt = np.array([r[idt] for r in rows[1:]])
             name, pol = self.phases[self.phase_i]
             crouch = float(np.degrees(((q0[3] + q0[9]) - (q0[4] + q0[10])) / 2))
+            # ★2026-09-04 着座の形(座面接触の時刻 / 骨盤の後退 / 膝の前方 / ヨーと滑り)。
+            #   「膝が出る」「回転する」を毎回その場で数値にする(sit_shape.py)。
+            #   FKは接触時・終端など数コマだけなので軽い。失敗しても統計は残す。
+            shape = {}
+            try:
+                if name.startswith("sit") and len(rows) >= 60 and self.obs_b is not None:
+                    if self._fk_shape is None:
+                        self._fk_shape = SagittalFK(self.obs_b.m, self.obs_b.d,
+                                                    self.obs_b.qadr)
+                    itau = [REC_COLS.index(f"tau{i}") for i in range(29)]
+                    iqw = REC_COLS.index("quat_w")
+                    itt = REC_COLS.index("t")
+                    qq = np.array([[r[k] for k in iq] for r in rows])
+                    tau = np.array([[r[k] for k in itau] for r in rows])
+                    quat = np.array([r[iqw:iqw + 4] for r in rows])
+                    tref = np.array([r[itt] for r in rows]).astype(int)
+                    mt = shape_metrics(qq, tau, quat, tref, pol.ref_q,
+                                       pol.ref["ref_quat"], self._fk_shape)
+                    self.log(shape_describe(mt))
+                    cm = lambda v: None if v is None else round(v * 100.0)   # noqa: E731
+                    shape = {"tc": mt["tc_s"], "backe": cm(mt["back_e"]),
+                             "kneex": cm(mt["kneex_e"]), "kdev": mt["kdev_e"],
+                             "yawc": mt["yaw_c"], "yawe": mt["yaw_e"],
+                             "slip": mt["slip_e"]}
+            except Exception as e:                 # noqa: BLE001
+                self.log(f"(着座の形の計算に失敗: {e})")
             self.run_stats.append({
                 "t": time.strftime("%H:%M:%S"),
                 "run": f"run{self.run_i:03d}", "pol": name, "how": how,
@@ -1884,6 +2411,10 @@ class Engine:
                 "asat": round(100.0 * float(np.mean(np.abs(act[:, 15:]) > 0.98)), 1),
                 "dt_med": round(float(np.median(dt)), 1),
                 "dt_max": round(float(dt.max()), 1),
+                "legres": round(float(self.leg_res), 2),
+                "cfade": self.contact_fade,
+                "tcl": (None if self._contact_t is None else round(self._contact_t / CONTROL_HZ, 2)),
+                **shape,
             })
             del self.run_stats[:-200]
         except Exception as e:                     # noqa: BLE001
@@ -1932,6 +2463,8 @@ class Engine:
         #   保持は「実際に走り終わったコマ」で行うこと。
         self.hold_pol = pol
         self.hold_t = max(0, min(self.t, pol.n) - 1)
+        if not self.is_sim:                        # 方策の走行が終わったのでLiDARを再開
+            self.walk.enable_sensors(True)
         if self.phase_i + 1 < len(self.phases):
             self.phase_i += 1
             if self.step_mode:
@@ -1943,9 +2476,16 @@ class Engine:
         else:
             self.fsm = "HOLD"
             self.log(f"{name} 完了。全フェーズ終了 — 方策で姿勢維持中")
+            # ★2026-09-04 午後: 椅子に載らずにしゃがんだまま「完走」し、自動ダンプで前へ倒れた
+            #   (11:51 run003: 骨盤が足より4cm前・終端の膝τ23N·m)。座面に載っている証拠が
+            #   無ければ自動移行を保留し、方策で保持したまま操作者の目視に任せる
+            self._seat_doubt = self._seat_check(name)
+            if self._seat_doubt:
+                self.log(f"★座面に載っていない疑い: {self._seat_doubt} — 完了後の自動移行を保留。"
+                         "方策で保持中。目視で確認して [ダンプ] か [スタンドロック] を押す")
             # 完了後に標準モードへ自動で渡す(操作者が選んだときだけ)。
             # ★50Hzループの中でRPCを呼ばないこと。_spawn でワーカーに出す。
-            if self.after_phase in ("seated", "sit", "damp"):
+            if self.after_phase in ("seated", "sit", "damp") and not self._seat_doubt:
                 nm = {"seated": "着座(FSM3)", "sit": "スクワット(FSM2)",
                       "damp": "ダンプ"}[self.after_phase]
                 self.log(f"完了後の自動移行: {nm} へ渡します")
@@ -2025,6 +2565,10 @@ class Engine:
                 "after_phase": self.after_phase,
                 "arm_res": float(self.arm_res),
                 "arm_res_mode": self.arm_res_mode,
+                "leg_res": float(self.leg_res),
+                "contact_fade": self.contact_fade,
+                "contact_t": (None if self._contact_t is None else round(self._contact_t / CONTROL_HZ, 2)),
+                "seat_doubt": self._seat_doubt,
                 "pol_scale": self._pol_scale(),
                 "run_stats": self.run_stats[-40:],
                 "ramp": float(self.action_ramp_s),
@@ -2060,6 +2604,16 @@ class Engine:
                 "go": self._go_check(),
                 "ground": getattr(self, "_ground", None),
                 "fsm_id": getattr(self, "_fsm_id", None),
+                "walk": self.walk.status(),
+                "hb_sec": float(self._heartbeat_sec),
+                "ui_lost": bool(self._ui_lost),
+                "ui_lost_s": (round(time.time() - self._ui_lost_t, 1) if self._ui_lost else 0.0),
+                "ui_lost_last": self._ui_lost_last,
+                "ui_plan": self._ui_loss_plan(),
+                "sit_gate": (None if self.sit_gate is None else
+                             {"ok": self.sit_gate["ok"], "items": self.sit_gate["items"],
+                              "token": self.sit_gate["token"], "pattern": self.sit_gate["pattern"],
+                              "age": round(time.time() - self.sit_gate["t"], 1)}),
                 "user_ctrl": bool(getattr(self.robot, "_use_user_topic", False)),
                 "logs": list(self.logs[-25:]),
                 **extra,
@@ -2068,7 +2622,12 @@ class Engine:
 
 PAGE = """<!doctype html><html lang="ja"><head><meta charset="utf-8">
 <title>G1 Cockpit</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#111">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
 <style>
 :root{--bg:#111;--card:#1c1c1c;--card2:#242424;--line:#333;--t1:#eee;--t2:#9a9a9a;
  --ok:#1baf7a;--warn:#eda100;--bad:#e34948;--acc:#3987e5}
@@ -2116,6 +2675,33 @@ table.st th{position:sticky;top:0;background:#1a1a1a;color:var(--t2);
 table.st th:first-child,table.st td:first-child{text-align:left}
 table.st td{text-align:right;padding:3px 6px;border-top:1px solid var(--line);white-space:nowrap}
 .scroll{max-height:430px;overflow:auto;border:1px solid var(--line);border-radius:8px}
+/* ---- 2026-09-04 スマホ(Android)向け。歩行の十字キーと下部固定の停止バー ---- */
+.num{width:74px;padding:6px 6px}
+.dpad{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;max-width:360px;margin:8px 0;
+ touch-action:none;user-select:none;-webkit-user-select:none}
+.dpad .dk{padding:14px 4px;font-size:15px;line-height:1.25;touch-action:none;
+ user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
+.dpad .dk.on{background:var(--acc)}
+#dk_stop{background:#7a1b1b;font-size:22px;font-weight:900}
+.fixbar{display:none;position:fixed;left:0;right:0;bottom:0;gap:8px;padding:8px 10px;
+ background:rgba(17,17,17,.97);border-top:1px solid var(--line);z-index:30}
+.fixbar button{flex:1;padding:16px 8px;font-size:18px;font-weight:900;border:none;border-radius:12px;color:#fff}
+@media (max-width:760px){
+ body{padding:8px;padding-bottom:100px;font-size:15px;overflow-x:hidden}
+ .top,.grid{grid-template-columns:1fr}
+ /* グリッドの子は min-width:auto だと中身(長い option や表)の幅まで広がって
+    横スクロールになる。0 にして枠に収め、長い語は折り返す */
+ .top>div,.grid>.card,.card,.sec,.row{min-width:0;max-width:100%}
+ .lbl,.card{overflow-wrap:anywhere}
+ .tiles{grid-template-columns:repeat(2,1fr)}
+ select{max-width:100%;width:100%}
+ .row>select{flex:1 1 160px}
+ button{padding:12px 14px;font-size:15px}
+ .fixbar{display:flex}
+ #estop,#estop_lbl{display:none}
+ .log{height:240px}
+ .scroll{max-height:300px}
+}
 </style></head><body>
 
 <h1>&#129302; G1 Cockpit <span id="mode" class="lbl"></span></h1>
@@ -2136,7 +2722,7 @@ table.st td{text-align:right;padding:3px 6px;border-top:1px solid var(--line);wh
  </div>
  <div>
   <button id="estop" onclick="cmd('estop')">&#9632; E-STOP</button>
-  <div class="lbl" style="margin-top:6px;text-align:center">スペースキーでも止まります</div>
+  <div class="lbl" id="estop_lbl" style="margin-top:6px;text-align:center">スペースキーでも止まります</div>
   <div class="card" style="margin-top:10px;padding:9px 11px">
    <div class="lbl" id="pwr">-</div>
   </div>
@@ -2272,6 +2858,38 @@ table.st td{text-align:right;padding:3px 6px;border-top:1px solid var(--line);wh
   dp4: 146〜242コマが「背もたれへ18度反る」区間(2026-08-27解析)</div>
  </div>
 
+ <div class="sec"><div class="st">5. 歩行(内蔵制御) — スマホ手動操作 / 自動歩行</div>
+  <div class="row">
+   <button onclick="cmd('walk_ready')">&#128694; 歩行モードへ(802)</button>
+   <button class="go" id="walk_auto" onclick="startAuto()">&#9654; 自動歩行 開始</button>
+   <button id="walk_stop" style="background:#7a1b1b;border:none;font-weight:700" onclick="cmd('walk_stop')">&#9632; 歩行停止(速度ゼロ)</button>
+  </div>
+  <div class="lbl">★[歩行モードへ]はロック立位(4)から走行(802)へ遷移する。走行制御が動くので
+  <b>機体を接地させ、リモコンのE-STOPを握って</b>押すこと(吊ったままだと空中で暴れる)。
+  [歩行停止]は速度をゼロにするだけで内蔵バランスは生きている。E-STOPはdampなので<b>歩行中に押すと倒れる</b>。</div>
+  <div class="row">停止距離 <input id="w_stop" type="number" step="0.05" min="0.3" max="2.5" value="0.60" class="num">m
+   &nbsp;横移動 <select id="w_dir"><option value="left">左へ</option><option value="right">右へ</option></select>
+   <input id="w_side" type="number" step="0.1" min="0.1" max="3" value="0.5" class="num">m
+   &nbsp;速度 <input id="w_v" type="number" step="0.05" min="0.05" max="0.9" value="0.35" class="num">m/s
+   &nbsp;最大前進 <input id="w_max" type="number" step="0.5" min="0.3" max="10" value="4" class="num">m
+   &nbsp;<label><input id="w_dry" type="checkbox"> ドライラン(速度を送らない)</label>
+   <button onclick="sendWalkParams()">適用</button>
+   <button onclick="cmd('lidar','on')">LiDAR読取 開始</button>
+   <button onclick="cmd('lidar','off')">停止</button></div>
+  <div class="lbl">自動歩行 = 前進 &rarr; LiDARで前方コリドー(幅0.7m)に障害物を見たら停止距離の手前で停止 &rarr;
+  指定した向きへ横移動 &rarr; 停止。障害物が無ければ最大前進距離で止まる(横移動はしない)。
+  ★頭のLiDARは膝より低い物が見えにくい。まず<b>ドライラン</b>で「前方」の距離が実物と合うことを確かめてから。</div>
+  <div id="walkst" class="lbl" style="line-height:1.8">-</div>
+  <div class="dpad" id="dpad" oncontextmenu="return false">
+   <div></div><button class="dk" data-v="1,0,0">&#9650;<br>前</button><div></div>
+   <button class="dk" data-v="0,1,0">&#9664;<br>左</button><button class="dk" id="dk_stop" onclick="cmd('walk_stop')">&#9632;</button><button class="dk" data-v="0,-1,0">&#9654;<br>右</button>
+   <button class="dk" data-v="0,0,1">&#8630;<br>左旋回</button><button class="dk" data-v="-1,0,0">&#9660;<br>後</button><button class="dk" data-v="0,0,-1">&#8631;<br>右旋回</button>
+  </div>
+  <div class="lbl">十字キーは<b>押している間だけ</b>動く(離すと0.5秒以内に停止。通信が切れても止まる)。
+  &nbsp;画面消灯防止: <span id="ka_st">-</span>
+  <video id="ka" src="/keepawake.webm" loop muted playsinline style="width:80px;height:60px;vertical-align:middle;opacity:.5;border-radius:6px"></video></div>
+ </div>
+
  <details><summary>詳細設定 (参照ブレンド / ランプ / ヨー合わせ / 進行)</summary>
   <div class="row">参照ブレンド
    <select id="sel_blend" onchange="cmd('blend',this.value)">
@@ -2287,6 +2905,25 @@ table.st td{text-align:right;padding:3px 6px;border-top:1px solid var(--line);wh
     <option value="0.5">0.5秒 — シムでrcの傾きが最小</option>
     <option value="0.8">0.8秒 — ★シムでrcが転倒。使わない</option>
    </select></div>
+  <div class="row">接触後の膝・足首の残差
+   <select id="sel_cfade" onchange="cmd('cfade',this.value)">
+    <option value="0">2秒で0へ抜く — ★実機 9/4 11時台に 3/3 崩れた。試験用</option>
+    <option value="0.3">2秒で0.3まで — 控えめ(シム 30cm・傾き最大14度)</option>
+    <option value="off" selected>★しない — 既定。実機で座れている設定(9/3・9/4 10時台)</option>
+   </select></div>
+  <div class="lbl">座面に乗った(両膝トルクが降下中ピークの40%を切った)あと、方策の膝・足首の残差を
+   時間で0へ抜き、参照の深い着座姿勢へ寄せる。方策は座面に乗った後も膝を曲げ足首を引く残差を
+   出し続け、足首〜骨盤が 30→20cm に縮んで浅く座っていた(実機11本+シムで確認)。
+   旧コックピットの「減衰retarget」を接触後に当てた形。<b>★実機未検証。最初はハーネスで。</b></div>
+  <div class="row">脚腰の残差(試験用)
+   <select id="sel_legres" onchange="cmd('legres',this.value)">
+    <option value="1.0" selected>1.00 — 既定。方策どおり(触らない)</option>
+    <option value="0.85">0.85 — ★A/B候補。ハーネス必須</option>
+    <option value="0.7">0.70 — シムで後退17→22cm・膝前16→9cm。実機開始状態では要注意</option>
+    <option value="0.6">0.60 — ★シムで転倒あり。使わない</option>
+   </select></div>
+  <div class="lbl">方策の脚腰(0〜14)の残差を縮める。<b>バランスの権限を縮めることになる</b>ので既定では触らない。
+   膝が前へ出る/回転する問題の切り分け用(docs/着座_膝と回転の解析_20260904.md)。</div>
   <div class="row">ヨー合わせ
    <select id="sel_yaw" onchange="cmd('yawalign',this.value)">
     <option value="on">ON(既定)</option>
@@ -2296,6 +2933,8 @@ table.st td{text-align:right;padding:3px 6px;border-top:1px solid var(--line);wh
    <select id="sel_mode" onchange="cmd('mode',this.value)">
     <option value="step">ステップ(各フェーズ前に確認)</option>
     <option value="auto">自動</option></select></div>
+  <div class="row"><button onclick="cmd('hbdrop','20')">通信途絶を模擬(20秒)</button>
+   <span class="lbl">シムで「途絶時の動作」(動作中は最後まで/立位はバランスへ返す)を確かめる用</span></div>
  </details>
 
  <details><summary>登り / 旋回 / 通しシーケンス</summary>
@@ -2356,9 +2995,15 @@ table.st td{text-align:right;padding:3px 6px;border-top:1px solid var(--line);wh
 </div>
 </div>
 
+<!-- スマホでは画面下に固定(親指の届く位置)。PCでは非表示 -->
+<div class="fixbar">
+ <button style="background:var(--bad)" onclick="cmd('estop')">&#9632; E-STOP</button>
+ <button style="background:#7a1b1b" onclick="cmd('walk_stop')">&#9632; 歩行停止</button>
+</div>
+
 <script>
 let S={sel:{}};
-function cmd(c,a){fetch('/cmd?c='+c+(a?('&a='+encodeURIComponent(a)):''),{method:'POST'})}
+function cmd(c,a){fetch('/cmd?c='+c+(a?('&a='+encodeURIComponent(a)):''),{method:'POST'}).catch(function(){})}
 function sel(k){cmd('select',k+':'+document.getElementById('sel_'+k).value)}
 function tab(id){
  document.querySelectorAll('.pane').forEach(e=>e.classList.remove('on'));
@@ -2431,7 +3076,8 @@ function drawCrouch(d){
 // 走行1本ごとの統計。npzを開かずコックピットが走行中に計算した値。
 const SCOL=[['t','時刻'],['run','run'],['how','結果'],['n','コマ'],['crouch','しゃがみ'],
  ['assist','補助'],['route','経路'],['rate0','開始揺れ'],['tmax','最大傾'],['tend','終端傾'],
- ['kdiff','膝左右差'],['ahip','左股a'],['asat','腕飽和%'],['dt_med','周期ms'],['dt_max','周期最大']];
+ ['kdiff','膝左右差'],['ahip','左股a'],['asat','腕飽和%'],['dt_med','周期ms'],['dt_max','周期最大'],
+ ['tc','接触s'],['backe','後退cm'],['kneex','膝前cm'],['kdev','膝角Δ'],['yawc','ヨー接触'],['yawe','ヨー終端'],['slip','滑り°'],['legres','脚残差'],['cfade','接触後'],['tcl','検知s']];
 const AL={'?':'未記入','none':'なし','light':'軽く','hold':'支えた'};
 function drawStats(rs){
  const e=document.getElementById('stats'); if(!e)return;
@@ -2450,6 +3096,10 @@ function drawStats(rs){
    if(c[0]==='ahip')st='color:'+(Math.abs(v)>0.4?'var(--bad)':'var(--ok)');
    if(c[0]==='kdiff')st='color:'+(v>0.4?'var(--warn)':'var(--t1)');
    if(c[0]==='dt_med')st='color:'+(v>25?'var(--bad)':'var(--t1)');
+   if(c[0]==='tc')st='color:'+(v!=null&&v<1.5?'var(--warn)':'var(--ok)');
+   if(c[0]==='backe')st='color:'+(v!=null&&v<25?'var(--warn)':'var(--ok)');
+   if(c[0]==='kneex')st='color:'+(v!=null&&v>5?'var(--warn)':'var(--ok)');
+   if(c[0]==='slip'||c[0]==='yawe')st='color:'+(v!=null&&Math.abs(v)>5?'var(--warn)':'var(--t1)');
    return '<td style="'+st+'">'+(v==null?'-':v)+'</td>';
   }).join('')+'</tr>';
  }
@@ -2458,7 +3108,9 @@ function drawStats(rs){
  document.getElementById('statsum').innerHTML=
   'この起動から '+n+'本 / 座れた(終端傾き15〜24&deg;) <b style="color:var(--ok)">'+ok+'本</b>'+
   '　参照は終端18.0&deg; / シム 最大22.1&deg;・終端18.5&deg;'+
-  '<br>左股a: 良+0.05〜+0.17 / 浅い回+0.78〜+0.81　膝左右差: シム0.11　周期: 正常20.0ms';
+  '<br>左股a: 良+0.05〜+0.17 / 浅い回+0.78〜+0.81　膝左右差: シム0.11　周期: 正常20.0ms'+
+  '<br>着座の形(2026-09-04): 接触は参照1.84s(実機0.9〜1.2s) / 後退は参照31cm(実機13〜28) / 膝前は参照0cm(実機+6〜22) / ヨー・滑りは0が理想。'+
+  '実機で早く座るほど後退が足りず膝が前に出る(docs/着座_膝と回転の解析)';
 }
 function fill(id,arr,cur,skip,notes){const e=document.getElementById(id);
  if(!e||e.dataset.done)return; e.dataset.done=1;
@@ -2495,6 +3147,8 @@ async function tick(){
  document.getElementById('sel_stop').value=String(d.stop_frame||0);
  document.getElementById('sel_after').value=d.after_phase||'none';
  document.getElementById('sel_armres').value=(d.arm_res===undefined?1:d.arm_res).toFixed(1);
+ const lr=document.getElementById('sel_legres'); if(lr){const v=(d.leg_res===undefined?1:d.leg_res); lr.value=(v>=0.999?'1.0':(Math.abs(v-0.85)<0.01?'0.85':(Math.abs(v-0.7)<0.01?'0.7':'0.6')));}
+ const cf=document.getElementById('sel_cfade'); if(cf&&d.contact_fade)cf.value=d.contact_fade;
  document.getElementById('sel_armmode').value=d.arm_res_mode||'lat';
  const ps=document.getElementById('polscale');
  if(ps){const p=d.pol_scale;
@@ -2558,12 +3212,334 @@ async function tick(){
  document.getElementById('log').textContent=d.logs.join('\\n');
  document.getElementById('next').disabled=(d.fsm!=='WAIT_CONFIRM');
  document.getElementById('place').style.display=d.is_sim?'inline-block':'none';
+ drawWalk(d.walk||{});
+}
+// ---- 歩行(内蔵制御): 状態表示 / パラメータ / 十字キー ----
+function drawWalk(w){
+ const ws=document.getElementById('walkst'); if(!ws)return;
+ const p=w.params||{};
+ const dist=(w.dist==null?'---':w.dist.toFixed(2)+'m');
+ const dcol=(w.dist!=null&&w.dist<=(p.stop_dist||0.6))?'var(--bad)':'var(--ok)';
+ const lid=(w.lidar_age_ms==null?'<b style="color:var(--bad)">未受信</b>':
+   (w.lidar_age_ms<1500?'OK':'<b style="color:var(--bad)">途絶</b>')+' '+w.lidar_age_ms+'ms');
+ const odo=(w.odom_age_ms==null?'<b style="color:var(--bad)">未受信</b>':
+   (w.odom_age_ms<800?'OK':'<b style="color:var(--bad)">途絶</b>'));
+ ws.innerHTML='歩行 <b>'+(w.ready?'準備OK(FSM '+w.fsm_id+')':'未準備')+'</b>'
+  +(w.auto?'&nbsp;<b style="color:var(--acc)">自動歩行中 '+w.phase+'</b>':'')
+  +(p.dry_run?'&nbsp;<b style="color:var(--warn)">ドライラン</b>':'')
+  +'&nbsp; 前方 <b style="color:'+dcol+'">'+dist+'</b>('+(w.n_obs||0)+'pt)'
+  +'&nbsp; 横の空き '+(w.side_free==null?'---':w.side_free.toFixed(2)+'m')
+  +'<br>LiDAR '+lid+' 座標系 '+(w.frame||'?')+' 床 '
+  +(w.floor_ok?(w.floor_h+'m'):'<b style="color:var(--warn)">未検出</b>')
+  +'&nbsp; odom '+odo+(w.odom?' ('+w.odom[0]+', '+w.odom[1]+', '+w.odom[2]+'&deg;)':'')
+  +'<br>送信 ('+(w.sent||[]).join(', ')+') 成功'+(w.n_sent||0)+'/失敗'+(w.n_fail||0)
+  +'&nbsp; 前進'+(w.traveled||0)+'m 横'+(w.side_traveled||0)+'m'
+  +(w.msg?'<br><b>'+w.msg+'</b>':'')
+  +(w.why?'<br><span style="color:var(--warn)">'+w.why+'</span>':'');
+ const ab=document.getElementById('walk_auto');
+ if(ab){ab.disabled=!!w.auto||!w.ready; ab.textContent=w.auto?'自動歩行 実行中…':'▶ 自動歩行 開始';}
+}
+function walkParams(){
+ const v=+document.getElementById('w_v').value;
+ return {stop_dist:+document.getElementById('w_stop').value,
+  side_dir:document.getElementById('w_dir').value,
+  side_dist:+document.getElementById('w_side').value,
+  v_fwd:v, tele_vx:v,
+  max_fwd:+document.getElementById('w_max').value,
+  dry_run:document.getElementById('w_dry').checked};
+}
+function sendWalkParams(){cmd('walk_param',JSON.stringify(walkParams()))}
+function startAuto(){
+ const w=S.walk||{};
+ if(!w.ready){alert('先に[歩行モードへ]を押してください');return}
+ sendWalkParams();
+ setTimeout(function(){cmd('walk_auto')},150);
+}
+// 十字キー: pointerdown で保持、100msごとに tele を送る。離す/外れる/キャンセル/
+// ウィンドウのフォーカス喪失で即ゼロ。サーバ側も0.5秒更新が無ければ止める
+let TELE=null, TELE_TIMER=null;
+function teleStart(e,b){
+ e.preventDefault();
+ if(b.setPointerCapture){try{b.setPointerCapture(e.pointerId)}catch(x){}}
+ const v=b.dataset.v.split(',').map(Number), p=walkParams();
+ TELE=[v[0]*p.v_fwd, v[1]*0.20, v[2]*0.45].map(x=>x.toFixed(3)).join(',');
+ b.classList.add('on');
+ cmd('tele',TELE);
+ if(TELE_TIMER)clearInterval(TELE_TIMER);
+ TELE_TIMER=setInterval(function(){if(TELE)cmd('tele',TELE)},100);
+}
+function teleEnd(){
+ if(TELE_TIMER){clearInterval(TELE_TIMER);TELE_TIMER=null}
+ if(TELE===null)return;
+ TELE=null;
+ document.querySelectorAll('.dk').forEach(x=>x.classList.remove('on'));
+ cmd('tele','0,0,0');
+}
+document.querySelectorAll('.dk[data-v]').forEach(b=>{
+ b.addEventListener('pointerdown',e=>teleStart(e,b));
+ ['pointerup','pointercancel','pointerleave','lostpointercapture'].forEach(ev=>b.addEventListener(ev,teleEnd));
+});
+window.addEventListener('blur',teleEnd);
+// ---- 画面消灯防止: Wake Lock API(https/localhost のみ) → だめなら小さな動画を再生 ----
+let WL=null;
+function setKA(s){const e=document.getElementById('ka_st');if(e)e.textContent=s}
+async function keepAwake(){
+ if('wakeLock' in navigator){
+  try{WL=await navigator.wakeLock.request('screen');
+      WL.addEventListener('release',function(){WL=null;setKA('解除(画面をタップで再取得)')});
+      setKA('WakeLock有効');return}catch(e){}
+ }
+ const v=document.getElementById('ka');
+ if(v){v.play().then(function(){setKA('動画で維持中(端末のスリープも長めに設定)')})
+       .catch(function(){setKA('★無効 — 端末のスリープ設定を長くすること')})}
 }
 setInterval(tick,200);tick();
 setInterval(function(){cmd('beat')},1000);
-document.addEventListener('visibilitychange',function(){if(!document.hidden)cmd('beat')});
+document.addEventListener('visibilitychange',function(){if(!document.hidden){cmd('beat');keepAwake()}});
+document.addEventListener('pointerdown',function(){if(!WL)keepAwake()});
+keepAwake();
 document.addEventListener('keydown',e=>{
  if(e.key===' '&&e.target.tagName!=='INPUT'){e.preventDefault();cmd('estop')}});
+</script></body></html>"""
+
+# ---- スマホ向けの付属物(2026-09-04) ------------------------------------------
+# 画面消灯防止用の小さな動画(VP8/webm 160×120・2秒・ループ)。Wake Lock API は
+# https か localhost でしか使えないので、http://192.168.179.100:8090 では
+# 「再生中の動画」で端末のスリープを抑止する(Androidの挙動に依存する保険。
+# 端末側のスリープ時間も長くしておくこと。docs/Android無線操作.md)
+KEEPAWAKE_WEBM_B64 = (
+    "GkXfo59ChoEBQveBAULygQRC84EIQoKEd2VibUKHgQJChYECGFOAZwEAAAAAAAS1EU2bdLpNu4tTq4QVSalmU6yBoU27i1OrhBZUrmtTrIHYTbuMU6uEElTDZ1OsggEbTbuMU6uEHFO7a1OsggSf7AEAAAAAAABZAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAVSalmsirXsYMPQkBNgI1MYXZmNjIuMTIuMTAxV0GNTGF2ZjYyLjEyLjEwMUSJiECfQAAAAAAAFlSua76uAQAAAAAAADXXgQFzxYigMusuWuY9eJyBACK1nIN1bmSIgQCGhVZfVlA4g4EBI+ODhA7msoDghrCBoLqBeBJUw2fYc3OgY8CAZ8iaRaOHRU5DT0RFUkSHjUxhdmY2Mi4xMi4xMDFzc7JjwItjxYigMusuWuY9eGfIoUWjiERVUkFUSU9ORIeTMDA6MDA6MDIuMDAwMDAwMDAwAB9DtnVDIeeBAKNBcIEAAIAQDQCdASqgAHgAAUcIhYWIhYSIAaIQGUXqRIbUByAPiq5IDvEX7fekdcgWKZzYH+zeAv7AP8I/in+T4AH9gIO1at6KyIPdmMAuGOkJf4lEg0+bxMYnsx0hJXETOsk8ziqbZjALhjpCYAqyIPdmMAuF+AD+/43EnfZF9se0mcuRvmQ5URUwro306Kfv//dOJf6CkX+vsYgn+wOk3hYQ0HejWnJfAa5KUUKv09IQY7f+Ye/Ps0AIao9uvEYrxwXaJt9tRXpHvukcv3M/zbWdfe2ytOQ8Wcqp5bHdb26wQ1j8a2WxvVXEg1S4/r8ojTaUGMOTqRzlv22n+hl1/vX8o+n519zRvMb1gX4sT/+FPO/2qt9LfZM1bMNhIoOgYj2CC5MMI0JSZLBcmHeP+fvOMSqUPhrn5H/k3NRQcv/3HQ//C7rM/yxWJKAf8bCgCtCGslNa1FivN/v9Dv3XmP2cVcXm9JP9ORomK96wzvwAo8OBAPoAEQQAARANEADAThu5+54HlyBpsrvOAOu58gJIB0cQDIpbNQBcre/5EkbqwbGi16O8ARBWTshYOeeBtlGttOIAo7KBAfQAsQMAAxANEADAAMsFOH9Btm4UIbIWtK4+g1mePl46rAAP15YAB9OxJTNJ1+R/AKO8gQLuALEDAAMQDRAAwADLAXP/QVCUWFvux3NTjOakzeoLOIWAMnOClv734rU1CI9CfFuhJ4lvPJml507Ao7eBA+gA0QMABxANEAD1YYBbCKafqpZGaLv6Cfx/my2Xo/0FavLMLp2xEnJdo3iYI3vO14XTXrAAo8aBBOIAEQQABxANEADANr9kSrABbCKijqpZXizRprp4VNrLaX6U2XQbp4p1FZyKXDcE4YasCQzdAJkN25MswVhDCrxFWsAAo7WBBdwAEQMABxANEADAAMsBer9BUXTlqOUGoRgUnh7ICsEugRwAMBLpOF5YELUaMBwGLOJ9gKO6gQbWABEDAAcQDRCjAAMsBer9BUXTiiAH33KQSmT3IBMMRz3kjVnAfPECoa5/vVdl+MLBdFQbgSFwABxTu2uRu4+zgQC3iveBAfGCAXjwgQM=")
+MANIFEST = json.dumps({
+    "name": "G1 Cockpit", "short_name": "G1", "start_url": "/",
+    "display": "standalone", "background_color": "#111111",
+    "theme_color": "#111111", "lang": "ja",
+    "icons": [{"src": "/icon.svg", "sizes": "any", "type": "image/svg+xml"}],
+}, ensure_ascii=False)
+ICON_SVG = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
+            '<rect width="64" height="64" rx="12" fill="#111"/>'
+            '<text x="32" y="43" font-size="30" text-anchor="middle" fill="#3987e5" '
+            'font-family="sans-serif" font-weight="700">G1</text></svg>')
+
+# ---- かんたん画面(2026-09-04)。既定の / で出す。詳細画面は /detail ----------------
+# 基本操作(ダンプ/スタンドロック/歩行モード)・前進(壁の手前で自然停止)・横歩き(足踏み)・
+# 5cm微調整・着座(サーバ側の確認 → 操作者の確認 → 3秒カウントダウン)・E-STOP。
+# ★ここも preflight 6b/6c の検査対象(cmd('X') が CMD_ALLOW にあるか、id が揃っているか)。
+PAGE_SIMPLE = """<!doctype html><html lang="ja"><head><meta charset="utf-8">
+<title>G1 かんたん操作</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#111">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<style>
+:root{--bg:#111;--card:#1b1b1b;--line:#333;--t1:#eee;--t2:#9a9a9a;--ok:#1baf7a;--warn:#eda100;--bad:#e34948;--acc:#3987e5}
+*{box-sizing:border-box;margin:0}
+body{background:var(--bg);color:var(--t1);font:16px/1.5 "Segoe UI",sans-serif;padding:10px 10px 110px;max-width:720px;margin:auto;overflow-x:hidden}
+.hd{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+.hd b{font-size:20px}.hd a{color:var(--acc);margin-left:auto;font-size:14px}
+.tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
+.tile{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:6px 8px;min-width:0}
+.tile .k{font-size:11px;color:var(--t2)}.tile .v{font-size:17px;font-weight:700;overflow-wrap:anywhere}
+#fsm{font-size:14px;letter-spacing:-.02em}
+.judge{margin:8px 0;padding:8px 12px;border-radius:10px;border:1px solid var(--line);font-size:14px;overflow-wrap:anywhere}
+.warnbar{margin:8px 0;padding:8px 12px;border-radius:10px;border:1px solid var(--warn);background:#2a2414;font-size:14px}
+section{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 12px;margin-top:10px}
+section h2{font-size:13px;color:var(--t2);letter-spacing:.05em;margin-bottom:8px}
+.btns3{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.btns2{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:8px}
+button{font:inherit;border-radius:12px;border:1px solid var(--line);background:#262626;color:var(--t1);padding:14px 8px;min-height:56px;cursor:pointer;font-weight:700}
+button:disabled{opacity:.35}
+button.go{background:var(--acc);border:none}
+button.stop{background:#7a1b1b;border:none}
+button.big{width:100%;font-size:18px;min-height:64px;margin-top:6px}
+.row{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;margin:6px 0;font-size:14px}
+input[type=number],select{font:inherit;border-radius:8px;border:1px solid var(--line);background:#262626;color:var(--t1);padding:8px}
+input[type=number]{width:84px}
+.st{font-size:13px;color:var(--t2);margin-top:8px;line-height:1.7;overflow-wrap:anywhere}
+.gate{margin-top:10px;padding:10px;border:1px solid var(--acc);border-radius:10px;background:#141c2a}
+.gate label{display:block;padding:6px 0;font-size:15px}
+.gi{font-size:14px;padding:2px 0}
+.log{font:12px/1.5 ui-monospace,monospace;white-space:pre-wrap;color:var(--t2);background:#161616;border-radius:8px;padding:8px;max-height:200px;overflow:auto}
+.fixbar{position:fixed;left:0;right:0;bottom:0;display:flex;gap:8px;padding:8px 10px;background:rgba(17,17,17,.97);border-top:1px solid var(--line);z-index:30}
+.fixbar button{flex:1;padding:16px 8px;font-size:18px;font-weight:900;border:none;color:#fff}
+.estop{background:var(--bad)}.stopb{background:#7a1b1b}
+</style></head><body>
+<div class="hd"><b>&#129302; G1</b><span id="mode" class="st" style="margin:0"></span><a href="/detail">詳細画面 &rarr;</a></div>
+<div class="tiles">
+ <div class="tile"><div class="k">FSM</div><div class="v" id="fsm">-</div></div>
+ <div class="tile"><div class="k">傾き</div><div class="v" id="tilt">-</div></div>
+ <div class="tile"><div class="k">制御</div><div class="v" id="loop">-</div></div>
+ <div class="tile"><div class="k">通信</div><div class="v" id="comm">-</div></div>
+</div>
+<div id="go" class="judge">-</div>
+<div id="uiloss" class="warnbar" hidden></div>
+<div id="seatdoubt" hidden style="background:#5a1b1b;color:#ffd6d6;border:1px solid #c33;border-radius:8px;padding:8px 10px;margin:6px 0;font-size:14px"></div>
+
+<section><h2>基本操作</h2>
+ <div class="btns3">
+  <button onclick="cmd('mode_damp')">ダンプ</button>
+  <button onclick="cmd('mode_stand')">スタンドロック</button>
+  <button onclick="cmd('walk_ready')">歩行モード</button>
+ </div>
+ <div class="st">スタンドロック=立位(FSM4)。歩行モード=走行制御(802)へ。押すと歩き出しうるので接地とE-STOPを確認。</div>
+</section>
+
+<section><h2>歩く</h2>
+ <div class="row">
+  <label>壁の手前で止まる距離 <input id="w_stop" type="number" step="0.05" min="0.3" max="2.5" value="0.60"> m</label>
+  <label>横歩き <select id="w_dir"><option value="left">左へ</option><option value="right">右へ</option></select>
+   <input id="w_side" type="number" step="0.05" min="0.02" max="3" value="0.50"> m</label>
+  <label><input id="w_avoid" type="checkbox" checked> 障害物は回り込む</label>
+ </div>
+ <div class="btns3">
+  <button class="go" id="b_fwd" onclick="walkGo('forward')">&#9650; 前進</button>
+  <button class="go" id="b_side" onclick="walkGo('side')">&#9664;&#9654; 横歩き</button>
+  <button class="stop" onclick="cmd('walk_stop')">&#9632; 歩行停止</button>
+ </div>
+ <div class="st" style="margin:8px 0 2px">小刻みステップ — 内蔵歩行に短い指令を出して1歩ずつ動き、オドメトリで測る。まず [1歩] で何cm動くかを見る。
+  強さ <select id="w_stepv" onchange="cmd('walk_param',JSON.stringify({step_v:+this.value}))"><option value="0.15">弱 0.15</option><option value="0.2" selected>中 0.20</option><option value="0.3">強 0.30</option></select>
+  <span id="stepinfo">-</span></div>
+ <div class="btns3">
+  <button onclick="step1('left')">&#9664; 左へ1歩</button>
+  <button onclick="step1('back')">&#9660; 後ろへ1歩</button>
+  <button onclick="step1('right')">右へ1歩 &#9654;</button>
+ </div>
+ <div class="btns2">
+  <button onclick="nudge('left')">&#9664; 左へ5cm</button>
+  <button onclick="nudge('right')">右へ5cm &#9654;</button>
+ </div>
+ <div id="walldist" style="margin-top:8px;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:#161616">
+  <div class="st" style="margin:0">前の壁（障害物）までの距離 — LiDAR は自動で読んでいます</div>
+  <div style="font-size:34px;font-weight:800;line-height:1.2" id="walldist_v">-</div>
+  <div class="st" id="walldist_s" style="margin:0">-</div>
+ </div>
+ <div id="walkst" class="st">-</div>
+</section>
+
+<section><h2>座る</h2>
+ <div class="row">方策 <select id="sel_sit" onchange="sel('sit')"></select></div>
+ <div class="row">椅子との距離を詰める（歩行モードで。後ろは LiDAR が見えないので目で見る）
+  <button onclick="nudgeBack(0.05)" style="min-height:44px">▼ 後ろへ5cm</button>
+  <button onclick="nudgeBack(0.10)" style="min-height:44px">▼ 後ろへ10cm</button></div>
+ <button class="go big" id="sit_btn" onclick="cmd('sit_check')">&#129681; 着座（この位置でよいか確認）</button>
+ <div id="sitgate" class="gate" hidden>
+  <div id="gate_items"></div>
+  <label><input type="checkbox" class="gk" onchange="gateUpd()"> 椅子は真後ろ、座面の前縁が踵の位置にある</label>
+  <label><input type="checkbox" class="gk" onchange="gateUpd()"> 機体は自立して静止している（支えていない）</label>
+  <label><input type="checkbox" class="gk" onchange="gateUpd()"> 周囲に人がいない。リモコンのE-STOPを握っている</label>
+  <div class="btns2"><button class="go" id="gate_go" onclick="sitGo()" disabled>着座を開始（3秒後）</button><button onclick="gateCancel()">やめる</button></div>
+  <div id="gate_cd" class="st"></div>
+ </div>
+ <div id="sitst" class="st">-</div>
+</section>
+
+<section><h2>通信が切れたときの動作（いまの状態）</h2><div id="uiplan" class="st">-</div>
+ <div class="st">物理E-STOP（リモコン）が最上位。傾き40度・受信断・送信断は従来どおり即ダンプ。</div></section>
+<section><h2>ログ</h2><div id="log" class="log"></div>
+ <div class="st">画面消灯防止: <span id="ka_st">-</span>
+ <video id="ka" src="/keepawake.webm" loop muted playsinline style="width:64px;height:48px;vertical-align:middle;opacity:.5;border-radius:6px"></video></div></section>
+
+<div class="fixbar">
+ <button class="estop" onclick="cmd('estop')">&#9632; E-STOP</button>
+ <button class="stopb" onclick="cmd('walk_stop')">&#9632; 歩行停止</button>
+</div>
+
+<script>
+let S={}, META=null, LASTOK=0, GATE_T=null, CD=null;
+function cmd(c,a){fetch('/cmd?c='+c+(a?('&a='+encodeURIComponent(a)):''),{method:'POST'}).catch(function(){})}
+function sel(k){cmd('select',k+':'+document.getElementById('sel_'+k).value)}
+function walkGo(mode){
+ const d={mode:mode, stop_dist:+document.getElementById('w_stop').value,
+  side_dir:document.getElementById('w_dir').value, side_dist:+document.getElementById('w_side').value,
+  avoid:document.getElementById('w_avoid').checked};
+ cmd('walk_go',JSON.stringify(d));
+}
+function nudge(dir){cmd('walk_go',JSON.stringify({mode:'side',nudge:true,side_dir:dir,side_dist:0.05}))}
+function nudgeBack(m){cmd('walk_go',JSON.stringify({mode:'back',nudge:true,back_dist:m}))}
+function step1(dir){cmd('walk_go',JSON.stringify({mode:'step',dir:dir}))}
+function drawWall(w){
+ const si=document.getElementById('stepinfo'); if(si) si.textContent='1歩≈'+(w.step_est_cm!=null?w.step_est_cm:'-')+'cm（前回 '+(w.step_last_cm!=null?w.step_last_cm:'-')+'cm、'+(w.steps||0)+'歩）';
+ const sv=document.getElementById('w_stepv'); if(sv&&w.params&&w.params.step_v!=null&&document.activeElement!==sv){ const t=String(+w.params.step_v); for(const o of sv.options){ if(String(+o.value)===t) sv.value=o.value; } }
+ const v=document.getElementById('walldist_v'), s=document.getElementById('walldist_s'); if(!v)return;
+ const p=w.params||{}, sd=p.stop_dist||0.6;
+ const lidarOK=(w.lidar_age_ms!=null&&w.lidar_age_ms<1500);
+ if(!lidarOK){ v.textContent='LiDAR 未受信'; v.style.color='var(--bad)'; s.textContent='点群が来ていません。機体の lidar_bridge を確認'; return; }
+ if(w.dist==null){ v.textContent='3m 以内に なし'; v.style.color='var(--ok)'; }
+ else { v.textContent=w.dist.toFixed(2)+' m'+(w.wall?'（壁）':(w.width!=null?'（幅 '+w.width+' m の障害物）':'')); v.style.color=(w.dist<=sd)?'var(--bad)':(w.dist<=sd+0.5?'var(--warn)':'var(--ok)'); }
+ s.textContent='停止距離 '+sd.toFixed(2)+' m　LiDAR '+w.lidar_age_ms+'ms 点'+(w.n_obs||0)+' 床 '+(w.floor_h==null?'-':w.floor_h+'m')
+  +(w.mount?'　取付: 高さ'+w.mount.height+'m 傾き'+w.mount.tilt_deg+'°':'')+(w.free_l!=null||w.free_r!=null?'　回り込み可 '+(w.free_l!=null?'左':'')+(w.free_r!=null?'右':''):'');
+}
+function gateUpd(){
+ const g=S.sit_gate, ks=document.querySelectorAll('.gk');
+ const all=Array.from(ks).every(x=>x.checked);
+ const b=document.getElementById('gate_go'); if(b)b.disabled=!(g&&g.ok&&all&&!CD);
+}
+function gateCancel(){ if(CD){clearInterval(CD);CD=null;} GATE_T=null; document.getElementById('sitgate').hidden=true;
+ document.querySelectorAll('.gk').forEach(x=>x.checked=false); document.getElementById('gate_cd').textContent='';}
+function sitGo(){
+ const g=S.sit_gate; if(!g||!g.ok)return;
+ let n=3; const e=document.getElementById('gate_cd'); e.textContent='3秒後に着座を開始します… [やめる]で中止';
+ document.getElementById('gate_go').disabled=true;
+ CD=setInterval(function(){ n--; if(n>0){e.textContent=n+'秒後に着座を開始します… [やめる]で中止';return}
+  clearInterval(CD);CD=null; e.textContent='開始しました'; cmd('sit_go',g.token);
+  setTimeout(gateCancel,1500); },1000);
+}
+async function loadMeta(){try{const m=await(await fetch('/state?meta=1')).json();META={patterns:m.patterns,notes:m.notes}}catch(e){}}
+function fillSit(d){const e=document.getElementById('sel_sit'); if(!e||e.dataset.done||!META)return; e.dataset.done=1;
+ e.innerHTML=META.patterns.sit.map(x=>'<option value="'+x+'" '+(x===d.sel.sit?'selected':'')+'>'+x+(META.notes[x]?' — '+META.notes[x].slice(0,40):'')+'</option>').join('');}
+async function tick(){
+ if(!META){await loadMeta();if(!META)return}
+ let d; try{d=await(await fetch('/state')).json()}catch(e){ drawComm(false); return }
+ S=d; LASTOK=Date.now(); drawComm(true); fillSit(d);
+ document.getElementById('mode').textContent=d.is_sim?'[SIMモック]':'[実機]';
+ const f=document.getElementById('fsm'); f.textContent=d.fsm; f.style.color=d.fsm==='DAMP'?'var(--bad)':(d.fsm==='RUNNING'?'var(--ok)':'var(--t1)');
+ const te=document.getElementById('tilt'); te.textContent=d.tilt_deg.toFixed(0)+'°'; te.style.color=d.tilt_deg>25?'var(--warn)':'var(--t1)';
+ const lp=d.loop||{}, le=document.getElementById('loop'); le.textContent=(lp.hz?lp.hz.toFixed(0):'-')+'Hz'; le.style.color=lp.ok?'var(--ok)':'var(--bad)';
+ const g=d.go||{ok:true,ng:[],warn:[]}, ge=document.getElementById('go');
+ if(g.ng&&g.ng.length){ge.style.borderColor='var(--bad)';ge.style.background='#2a1414';ge.innerHTML='<b style="color:var(--bad)">■ 実行できません</b> '+g.ng.map(x=>'・'+x).join(' ');}
+ else if(g.warn&&g.warn.length){ge.style.borderColor='var(--warn)';ge.style.background='#2a2414';ge.innerHTML='<b style="color:var(--warn)">▲ 要注意</b> '+g.warn.map(x=>'・'+x).join(' ');}
+ else{ge.style.borderColor='var(--ok)';ge.style.background='#142a1e';ge.innerHTML='<b style="color:var(--ok)">● 実行してよい状態です</b>';}
+ const ul=document.getElementById('uiloss');
+ if(d.ui_lost_last){ul.hidden=false; ul.innerHTML='<b>通信が '+d.ui_lost_last.dur+' 秒途絶えていました('+d.ui_lost_last.t+')</b><br>途絶中の対応: '+d.ui_lost_last.what;} else ul.hidden=true; const sd=document.getElementById('seatdoubt'); if(sd){ if(d.seat_doubt){sd.hidden=false; sd.innerHTML='<b>★座面に載っていない疑い</b>: '+d.seat_doubt+'<br>自動ダンプは保留。方策で保持中 — 目視で確認して [ダンプ] か [スタンドロック]';} else sd.hidden=true; }
+ document.getElementById('uiplan').textContent=d.ui_plan||'-';
+ const w=d.walk||{}, p=w.params||{};
+ const dist=(w.dist==null?'なし(3m以内)':w.dist.toFixed(2)+'m'+(w.wall?'（壁）':(w.width!=null?'（幅'+w.width+'m の障害物）':'')));
+ document.getElementById('walkst').innerHTML=
+  '歩行 <b>'+(w.ready?'準備OK(FSM '+w.fsm_id+')':'未準備 — [歩行モード]を押す')+'</b>'
+  +(w.auto?' <b style="color:var(--acc)">実行中 '+w.phase+'</b>':'')
+  +'<br>前方 <b style="color:'+((w.dist!=null&&w.dist<=(p.stop_dist||0.6))?'var(--bad)':'var(--ok)')+'">'+dist+'</b>'
+  +' 速度 '+(w.v||0)+' m/s　進み '+(w.traveled||0)+'m　ずれ '+((w.offset||0)*100).toFixed(0)+'cm　回り込み '+(w.detours||0)+'回'
+  +'<br>LiDAR '+(w.lidar_age_ms==null?'<b style="color:var(--bad)">未受信</b>':(w.lidar_age_ms<1500?'OK':'<b style="color:var(--bad)">途絶</b>'))
+  +'　odom '+(w.odom_age_ms==null?'<b style="color:var(--bad)">未受信</b>':(w.odom_age_ms<800?'OK':'<b style="color:var(--bad)">途絶</b>'))
+  +(w.msg?'<br>'+w.msg:'');
+ const fb=document.getElementById('b_fwd'), sb=document.getElementById('b_side'); if(fb){fb.disabled=!w.ready||w.auto; sb.disabled=!w.ready||w.auto;}
+ drawWall(w);
+ document.getElementById('sitst').innerHTML=(d.phases&&d.phases.length?('方策 '+d.phases.join(' → ')+'　コマ '+d.t+'/'+d.n+'<br>'):'')+(d.msg||'');
+ const gt=d.sit_gate, gp=document.getElementById('sitgate');
+ if(gt&&(gt.token!==GATE_T)){GATE_T=gt.token; document.querySelectorAll('.gk').forEach(x=>x.checked=false); document.getElementById('gate_cd').textContent='';}
+ if(gt){gp.hidden=false;
+  document.getElementById('gate_items').innerHTML='<div class="gi"><b>'+(gt.ok?'点検OK — 下の3つを確認して開始':'★点検NG — 直してからもう一度')+'</b>（'+gt.pattern+'、'+gt.age+'秒前）</div>'
+   +gt.items.map(it=>'<div class="gi" style="color:'+(it[0]===false?'var(--bad)':(it[0]===null?'var(--warn)':'var(--ok)'))+'">'+(it[0]===false?'×':(it[0]===null?'△':'○'))+' '+it[1]+'</div>').join('');
+  if(gt.age>30){gateCancel();}
+  gateUpd();
+ } else if(!CD){gp.hidden=true;}
+ document.getElementById('log').textContent=(d.logs||[]).slice(-10).join(String.fromCharCode(10));
+}
+function drawComm(ok){const c=document.getElementById('comm'); if(!c)return;
+ const age=(Date.now()-LASTOK)/1000;
+ if(ok||age<3){c.textContent='OK';c.style.color='var(--ok)';} else {c.textContent='途絶 '+age.toFixed(0)+'s';c.style.color='var(--bad)';}}
+let WL=null;
+function setKA(s){const e=document.getElementById('ka_st');if(e)e.textContent=s}
+async function keepAwake(){
+ if('wakeLock' in navigator){try{WL=await navigator.wakeLock.request('screen');WL.addEventListener('release',function(){WL=null;setKA('解除(タップで再取得)')});setKA('WakeLock有効');return}catch(e){}}
+ const v=document.getElementById('ka'); if(v){v.play().then(function(){setKA('動画で維持中(端末のスリープも長めに)')}).catch(function(){setKA('★無効 — 端末のスリープ設定を長くすること')})}
+}
+setInterval(tick,250);tick();
+setInterval(function(){cmd('beat')},1000);
+document.addEventListener('visibilitychange',function(){if(!document.hidden){cmd('beat');keepAwake()}});
+document.addEventListener('pointerdown',function(){if(!WL)keepAwake()});
+keepAwake();
+document.addEventListener('keydown',e=>{if(e.key===' '&&e.target.tagName!=='INPUT'){e.preventDefault();cmd('estop')}});
 </script></body></html>"""
 
 
@@ -2603,8 +3579,17 @@ class Handler(BaseHTTPRequestHandler):
             self._send(json.dumps(d).encode(), "application/json")
         elif p == "/frame.jpg" and self.engine.is_sim:
             self._send(self.engine.robot.render_jpeg(), "image/jpeg")
-        else:
+        elif p == "/keepawake.webm":
+            self._send(base64.b64decode(KEEPAWAKE_WEBM_B64), "video/webm")
+        elif p == "/manifest.webmanifest":
+            self._send(MANIFEST.encode(), "application/manifest+json")
+        elif p == "/icon.svg":
+            self._send(ICON_SVG.encode(), "image/svg+xml")
+        elif p in ("/detail", "/full"):
             self._send(PAGE.encode(), "text/html; charset=utf-8")
+        else:
+            # 既定はかんたん画面(2026-09-04)。詳細画面は /detail
+            self._send(PAGE_SIMPLE.encode(), "text/html; charset=utf-8")
 
     def do_POST(self):
         q = parse_qs(urlparse(self.path).query)
@@ -2618,6 +3603,13 @@ class Handler(BaseHTTPRequestHandler):
             self.engine.estop_now(why)
         elif c == "beat":
             self.engine.beat()
+        elif c == "walk_stop":
+            # ★キューに載せない。歩行の停止は即時に(速度ゼロ。dampではない)
+            self.engine.walk_stop(a or "操作者による停止")
+        elif c == "tele":
+            # スマホ十字キー(100ms周期)。キューに積むと遅れるので直接渡す
+            self.engine.beat()                     # 操作中はUIが生きている証拠
+            self.engine.tele(a)
         elif c == "select" and a and ":" in a:
             k, v = a.split(":", 1)
             self.engine.command("select", (k, v))
@@ -2695,6 +3687,7 @@ def main():
         #   出ないままプロセスが終わり得た。close() は damp を実際に
         #   送り切ってから送信スレッドを止める
         eng.estop_now("サーバ終了")
+        eng.walk.close()                   # 歩行の速度ゼロを送ってから
         eng._drain_saves()                 # ★記録を書き切ってから閉じる
         eng._closing = True
         robot.close()
