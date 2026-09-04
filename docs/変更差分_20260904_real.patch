@@ -10,8 +10,8 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +real/walk_calib.json
 diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png' -x '*.patch' -x walk_calib.json /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/README.md g1-proj-main/README.md
 --- /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/README.md	2026-09-03 18:26:29.000000000 +0900
-+++ g1-proj-main/README.md	2026-09-04 15:59:03.066054794 +0900
-@@ -7,10 +7,42 @@
++++ g1-proj-main/README.md	2026-09-04 16:14:05.564311889 +0900
+@@ -7,10 +7,43 @@
  
  ---
  
@@ -44,6 +44,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +| 一度で止めて戻さない(9/4 夕) | `real/autowalk.py`(`_final_approach`) | 短い指令の出し止めで後ろへ揺り戻っていた(1 回 −4〜−16 cm)+目標座標の取り違え。最後 35 cm はゆっくり歩き続けて残り 8 cm で一度だけ止め、補正も戻しもしない。docs/自動歩行 §6b-9 |
 +| 学習を止めて後退を抑える(9/4 夕) | `real/autowalk.py`(`VelCalib`) | 速度係数の学習が歩くたびに指令を小さくし、歩き出し前の揺り戻りだけが残って後退量が増えた。学習 OFF・係数固定・動かす指令の下限 0.30。docs/自動歩行 §6b-10 |
 +| 停止後の後退への対策(9/4 夕) | `real/autowalk.py`(`_final_approach`, `_log_post_stop`=アンカー保持) | 後ろ向きの指令は出ていないのに停止直後に 20〜50 cm 後退。減速を早めて実速度を落としてから止め、止めた後 6 秒は位置を見張って戻す。停止距離の内側では後ろへ歩かない。docs/自動歩行 §6b-11 |
++| 目的地でロック立位(9/4 夕) | `real/autowalk.py`(`_lock_stand`, `_unlock_if_needed`) | 止まったら足踏みをやめて FSM 4 で静止。次の前進で自動で歩行へ戻る。回り込み不成立の理由をログに。docs/自動歩行 §6b-12 |
 +実機での検証順は 自動歩行 §6(A 距離表示 → B ドライラン → C 十字キー → D 短距離 → E 既定値)。
 +
  ## 引き継ぐ人がまず読むもの(この順で)
@@ -846,8 +847,8 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +  まま(先方のサービス。disable しない)。
 diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png' -x '*.patch' -x walk_calib.json "/tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/docs/\350\207\252\345\213\225\346\255\251\350\241\214_\351\232\234\345\256\263\347\211\251\345\201\234\346\255\242_\346\250\252\347\247\273\345\213\225.md" "g1-proj-main/docs/\350\207\252\345\213\225\346\255\251\350\241\214_\351\232\234\345\256\263\347\211\251\345\201\234\346\255\242_\346\250\252\347\247\273\345\213\225.md"
 --- "/tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/docs/\350\207\252\345\213\225\346\255\251\350\241\214_\351\232\234\345\256\263\347\211\251\345\201\234\346\255\242_\346\250\252\347\247\273\345\213\225.md"	1970-01-01 09:00:00.000000000 +0900
-+++ "g1-proj-main/docs/\350\207\252\345\213\225\346\255\251\350\241\214_\351\232\234\345\256\263\347\211\251\345\201\234\346\255\242_\346\250\252\347\247\273\345\213\225.md"	2026-09-04 15:59:03.066054794 +0900
-@@ -0,0 +1,400 @@
++++ "g1-proj-main/docs/\350\207\252\345\213\225\346\255\251\350\241\214_\351\232\234\345\256\263\347\211\251\345\201\234\346\255\242_\346\250\252\347\247\273\345\213\225.md"	2026-09-04 16:14:05.564311889 +0900
+@@ -0,0 +1,420 @@
 +# 自動歩行 — 前進(壁の手前で自然に停止・障害物は回り込み) / 横歩き(足踏み)(2026-09-04)
 +
 +実装: `real/autowalk.py`(本体)、`real/cockpit.py`(UI と配線)、
@@ -1220,6 +1221,26 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +{"anchor_s":15})か、ハーネス無しで比較する。障害物の回り込み自体は 14:50〜14:52 に 3 回とも開始しており
 +(寄せ 0.21〜0.29 m)、その後の後退は同じ停止時の現象。
 +
++
++### 6b-12. 目的地で足踏みをやめてロック立位で静止(2026-09-04 夕)
++
++操作者の報告: ハーネスを外すと停止後に後ろへ歩く。「目的地に近づいたら足踏みをやめてバランスを取れないか」。
++15:06〜15:09 の 3 走行(アンカー保持あり)は停止後 6 秒で −4.8〜−9.8 cm(寄せ直し 1〜2 回)。寄せ直しの指令 0.30
++では機体がほとんど動かず、ずれが残った。
++
++対応(`stop_lock`=True 既定):
++- 目的地で止めたら(0.8 秒静止のあと)**ロック立位 SetFsmId(4)** へ切り替える。歩行制御の足踏みが止まり、
++  バランスだけで立つので、後ろへ歩き出さない。停止後 3 秒の位置変化をログに出す(「…(ロック立位)」)。
++- 次の [前進] / [横歩き] / [1歩] は**自動で歩行(200)へ戻ってから**動く(`_unlock_if_needed`: 4→500→200)。
++  十字キーはロック中は受けず、案内を出す。[着座] はロック立位(4)からそのまま 802→UserCtrl に入れる(むしろ好都合)。
++- 歩行モードに入るとき `SetBalanceMode(0)`(速度ゼロで足踏みをやめる設定)を明示的に送る。
++- `stop_lock=False` にすると従来のアンカー保持(6 秒見張って寄せ直す)。
++
++障害物の回り込みが始まらない件の切り分け用に、走行ログ(`walk_*.jsonl`)に `ah_wall`(壁判定)・`ah_w`(横幅)・
++`free_l/free_r`(回り込み先)・`wall_len` を残し、回り込み先が無いときは「障害物 x m(横幅 y m)に回り込み先が無い
++(左 …/右 …)— 手前で止まります」とイベントに出す。壁の判定は横幅 1.4 m 超のまま。前方の空き判定の奥行きを
++0.5 m に制限した(奥の壁まで含めて「空いていない」と誤判定していた可能性)。
++
 +## 7. 既知の限界
 +
 +- **頭部 LiDAR(Livox Mid-360)は低い障害物が見えにくい**(旧コックピットの現場注記:
@@ -1552,8 +1573,8 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
  タブを前面に保つこと**。ブラウザはバックグラウンドのタブでタイマーを
 diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png' -x '*.patch' -x walk_calib.json /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/autowalk.py g1-proj-main/real/autowalk.py
 --- /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/autowalk.py	1970-01-01 09:00:00.000000000 +0900
-+++ g1-proj-main/real/autowalk.py	2026-09-04 15:57:19.259615642 +0900
-@@ -0,0 +1,2035 @@
++++ g1-proj-main/real/autowalk.py	2026-09-04 16:13:34.988285951 +0900
+@@ -0,0 +1,2113 @@
 +#!/usr/bin/env python3
 +"""自動歩行(前進 → 壁の手前で自然に停止 / 障害物は回り込んで元の経路へ / 横歩きは
 +細かい足踏み)と、スマホからの手動操作(押している間だけ動く)のための速度送信。
@@ -1629,6 +1650,8 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +    cmd_max=0.90,      # 指令の上限[m/s]
 +    final_zone=0.60,   # 目標までこの距離[m]に入ったら一定のゆっくり歩き(実速度 0.08 目安)で寄せ、残り 8cm で一度だけ止める
 +    anchor_s=6.0,      # 止めた後、この秒数は位置を見張り、後ろへ 5cm 以上ずれたら前へ寄せ直す(アンカー保持)
++    stop_lock=True,    # 目的地で止まったら足踏みをやめてロック立位(FSM 4)で静止する(操作者の指示 2026-09-04)。
++                       #   次の[前進]/[横歩き]は自動で歩行(200)へ戻ってから動く
 +    yaw_autocal=False, # LiDAR ヨーの自動較正。★壁が主な景色だと壁沿いの平行移動が決まらず ±20° の雑音になった(14:0x)。既定 OFF
 +    cmd_dur=2.0,       # SetVelocity の duration[s]。SDK の Move(continuous) は 864000 だが、自プロセスが死んでも
 +                       #   2 秒で止まるように有限にする。送信は 10Hz で上書きし続ける
@@ -2082,12 +2105,12 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +            if int(mc.sum()) >= 12:
 +                lo = float(np.percentile(lat[mc], 3))
 +                hi = float(np.percentile(lat[mc], 97))
-+                depth = max(0.0, float(np.percentile(fwd[mc], 95)) - d0)
++                depth = min(0.5, max(0.0, float(np.percentile(fwd[mc], 95)) - d0))
 +                wall = ((hi - lo) > cfg["wall_width"]) or (lo < -1.0 and hi > 1.0)
 +                mgn = cfg["detour_margin"]
 +
 +                def free(e_lo, e_hi):
-+                    mb = (hm & (fwd > d0 - 0.5) & (fwd < d0 + depth + 0.8)
++                    mb = (hm & (fwd > d0 - 0.4) & (fwd < d0 + depth + 0.5)
 +                          & (lat > e_lo) & (lat < e_hi))
 +                    return int(mb.sum()) < 6
 +                bh = float(cfg.get("body_half", 0.25))       # 体の半幅(ギリギリを通る)
@@ -2905,6 +2928,30 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +        return turned
 +
 +    def _log_post_stop(self):
++        """止めた後の処理。stop_lock=True(既定): 足踏みをやめてロック立位(FSM 4)で静止し、3 秒の位置変化をログ。
++        stop_lock=False: アンカー保持(下記)。"""
++        if self.p.get("stop_lock", True):
++            try:
++                od, _obs = self._sense()
++                s0, e0 = self._pose(od)
++                self.io["vel"](0.0, 0.0, 0.0)
++                ok = self.io["lock_stand"]()
++                self.io["log"]("足踏みをやめてロック立位(FSM 4)で静止します" + ("" if ok else "(★ロック立位へ入れませんでした)"))
++                t0 = time.time()
++                while time.time() - t0 < 3.0:
++                    time.sleep(0.1)
++                    self._sense()
++                od, _obs = self._sense()
++                s1, e1 = self._pose(od)
++                self.io["log"](f"停止後 3 秒の位置変化: 前後 {(s1 - s0) * 100:+.1f}cm 横 {(e1 - e0) * 100:+.1f}cm(ロック立位)")
++            except _Abort:
++                pass
++            except Exception as ex:                # noqa: BLE001
++                self.io["log"](f"(停止後の処理で例外: {ex})")
++            return
++        self._anchor_hold()
++
++    def _anchor_hold(self):
 +        """アンカー保持: 止めた後 anchor_s 秒、位置を見張る。後ろ(経路の −s)へ 5cm 以上ずれたら前へ寄せ直し、
 +        横へ 8cm 以上ずれたら横へ寄せ直す(いずれも歩き出す下限の指令、2cm 以内で止める)。前へのずれ(壁側)は
 +        追わない。終わりに位置の変化をログに出す(「停止後 N 秒の位置変化」)。
@@ -3010,6 +3057,10 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +                    e_t = min(cands, key=abs)
 +                    veer = dict(e_t=e + e_t, s_end=s + dist + ah["depth"] + 0.25, stage="out",
 +                                dir=(1.0 if e_t > 0 else -1.0))
++                elif now - getattr(self, "_t_noveer", 0.0) > 2.0:
++                    self._t_noveer = now
++                    self.io["log"](f"障害物 {dist:.2f}m(横幅{ah['lat_hi'] - ah['lat_lo']:.2f}m)に回り込み先が無い"
++                                   f"(左 {ah.get('free_l')} / 右 {ah.get('free_r')}、横 {p['detour_max']:.1f}m 以内に空きなし) — 手前で止まります")
 +                    self.io["log"](f"障害物 {dist:.2f}m(横幅{ah['lat_hi'] - ah['lat_lo']:.2f}m・奥行{ah['depth']:.2f}m) — "
 +                                   f"歩きながら{'左' if e_t > 0 else '右'}へ{abs(e_t):.2f}m寄せて脇を通ります")
 +                    self.phase = "DETOUR_OUT"
@@ -3105,9 +3156,12 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +                        f"{d_s}{'(壁)' if (ah and ah['wall']) else ''}{wa_s}"
 +                        f" | {self.traveled:.2f}m ずれ{e * 100:+.0f}cm")
 +            self._rec(vx=round(self.v, 3), vy=round(vy_now, 3), om=round(om, 3), cx=round(cx, 3), cy=round(cy, 3),
-+                      kx=round(self.cal.k["x"], 3), dist=dist,
-+                      s=round(self.traveled, 3), e=round(e, 3), n=obs.get("n_obs"),
-+                      wall_ang=obs.get("wall_ang"), veer=(None if veer is None else veer["stage"]))
++                      dist=dist, s=round(self.traveled, 3), e=round(e, 3), n=obs.get("n_obs"),
++                      wall_ang=obs.get("wall_ang"), wall_len=obs.get("wall_len"),
++                      ah_wall=(None if ah is None else bool(ah["wall"])),
++                      ah_w=(None if ah is None else round(ah["lat_hi"] - ah["lat_lo"], 2)),
++                      free_l=(None if ah is None else ah.get("free_l")), free_r=(None if ah is None else ah.get("free_r")),
++                      veer=(None if veer is None else veer["stage"]))
 +
 +    def _main(self):
 +        p = self.p
@@ -3249,7 +3303,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +                v = str(v) if str(v) in ("both", "forward", "side", "back", "step") else "both"
 +            elif k == "step_dir":
 +                v = str(v) if str(v) in ("left", "right", "back", "fwd") else "left"
-+            elif k in ("dry_run", "avoid", "align_wall", "wall_track", "gait_cont", "yaw_autocal", "calib_learn"):
++            elif k in ("dry_run", "avoid", "align_wall", "wall_track", "gait_cont", "yaw_autocal", "calib_learn", "stop_lock"):
 +                v = bool(v) if not isinstance(v, str) else (v.lower() in ("1", "true", "on", "yes"))
 +            else:
 +                try:
@@ -3434,10 +3488,14 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +        self.fsm_id = fsm
 +        self.ready = bool(ok)
 +        if ok:
++            self.locked = False
 +            self.enable_sensors(True)
 +            fn = getattr(self.robot, "set_speed_mode", None)
 +            if fn is not None:
 +                fn(int(self.params.get("speed_mode", 0)), log=self.log)
++            fn2 = getattr(self.robot, "set_gait_continuous", None)
++            if fn2 is not None and not self.params.get("gait_cont", False):
++                fn2(False, log=self.log)           # 速度ゼロで足踏みをやめる設定(BalanceMode 0)を明示
 +            self.log(f"歩行モード(FSM {fsm})。[前進][横歩き]、十字キーの手動操作が押せます")
 +        else:
 +            self.log(f"★歩行モードへ入れませんでした(FSM {fsm})")
@@ -3449,6 +3507,11 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +            return False
 +        if self.auto is not None and not self.auto.done:
 +            return False                           # 自動歩行中は手動を受けない
++        if getattr(self, "locked", False):
++            if time.time() - getattr(self, "_t_lockmsg", 0.0) > 3.0:
++                self._t_lockmsg = time.time()
++                self.log("ロック立位で静止中です。十字キーで動かすには [歩行モード] を押してください([前進][横歩き]は自動で戻ります)")
++            return False
 +        p = self.params
 +        vx = float(np.clip(vx, -p["tele_vx"] * 0.6, p["tele_vx"]))   # 後退は6割
 +        vy = float(np.clip(vy, -p["tele_vy"], p["tele_vy"]))
@@ -3457,6 +3520,38 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +        self.sender.set(vx, vy, om, "tele", dry=bool(p.get("dry_run")))
 +        return True
 +
++    def _lock_stand(self):
++        """目的地でロック立位(FSM 4)へ。足踏みをやめてバランスだけで静止する。戻り値: 成功か"""
++        try:
++            self.sender.stop("ロック立位へ")
++            time.sleep(0.3)
++            ok = bool(self.robot.standard_mode("stand"))
++        except Exception as ex:                    # noqa: BLE001
++            self.log(f"★ロック立位へ切り替えられません: {ex}")
++            ok = False
++        self.locked = ok
++        if ok:
++            self.fsm_id = 4
++        return ok
++
++    def _unlock_if_needed(self):
++        """ロック立位(4)に居たら歩行(200)へ戻す。戻り値: 歩行 FSM に居るか"""
++        f = None
++        try:
++            f = self.robot.get_fsm_id()
++        except Exception:                          # noqa: BLE001
++            pass
++        if f in WALK_FSMS:
++            self.locked = False
++            return True
++        self.log("ロック立位から歩行へ戻します")
++        ok, f2 = self.robot.ensure_walk_mode(log=self.log)
++        self.fsm_id = f2
++        self.locked = not ok
++        if ok:
++            time.sleep(0.5)                        # 歩行制御の立ち上がりを待つ
++        return bool(ok)
++
 +    def start_auto(self, overrides=None):
 +        """自動歩行を始める。overrides でこの1回だけのパラメータ(mode, side_dist 等)を上書き"""
 +        if not self.ready:
@@ -3464,6 +3559,9 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +            return False
 +        if self.auto is not None and not self.auto.done:
 +            self.log("★自動歩行はすでに実行中です")
++            return False
++        if not self._unlock_if_needed():
++            self.log("★歩行モードへ戻れませんでした")
 +            return False
 +        if not self.enabled:
 +            self.enable_sensors(True)
@@ -3495,7 +3593,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +        elif not obs.get("ok") and not side_only:
 +            self.log(f"★障害物の判定ができません: {obs.get('why')}。自動歩行は始めません")
 +            return False
-+        io = dict(obstacle=self.obstacle,
++        io = dict(obstacle=self.obstacle, lock_stand=self._lock_stand,
 +                  odom=lambda: self.odom.latest(),
 +                  yaw=self.robot.yaw,
 +                  tilt_deg=self._tilt_deg,
@@ -3547,6 +3645,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +        ah = obs.get("ahead") or {}
 +        return {
 +            "ready": bool(self.ready), "fsm_id": self.fsm_id,
++            "locked": bool(getattr(self, "locked", False)),
 +            "sensors": bool(self.enabled),
 +            "auto": bool(a is not None and not a.done),
 +            "phase": (a.phase if a is not None else "-"),
@@ -6409,8 +6508,8 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +WantedBy=multi-user.target
 diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png' -x '*.patch' -x walk_calib.json /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/test_autowalk.py g1-proj-main/real/test_autowalk.py
 --- /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/test_autowalk.py	1970-01-01 09:00:00.000000000 +0900
-+++ g1-proj-main/real/test_autowalk.py	2026-09-04 16:02:05.571142998 +0900
-@@ -0,0 +1,350 @@
++++ g1-proj-main/real/test_autowalk.py	2026-09-04 16:13:34.988285951 +0900
+@@ -0,0 +1,371 @@
 +#!/usr/bin/env python3
 +"""autowalk の机上試験(実機不要・1〜2分)。
 +
@@ -6606,7 +6705,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +    print("--- 3. 壁の手前で段階的に減速して停止(前進のみ) ---")
 +    wall_front = 2.5 - 0.1
 +    robot, tk, wc = _setup([dict(x=2.5, y=0.0, w=4.0, d=0.2, h=1.0)],
-+                           dict(v_fwd=0.5, stop_dist=0.6, mode="forward", max_fwd=6.0))
++                           dict(v_fwd=0.5, stop_dist=0.6, mode="forward", max_fwd=6.0, stop_lock=False))
 +    st = wc.status()
 +    check(st["dist"] is not None and abs(st["dist"] - wall_front) < 0.12 and st["wall"],
 +          f"開始時: 壁 {st['dist']}m 壁判定={st['wall']} (期待{wall_front:.2f})")
@@ -6733,6 +6832,26 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +    wc.close()
 +
 +
++def test_lock():
++    print("--- 5c. 目的地でロック立位(足踏みをやめる)→ 次の前進で歩行へ自動で戻る ---")
++    robot, tk, wc = _setup([dict(x=2.0, y=0.0, w=4.0, d=0.2, h=1.0)],
++                           dict(v_fwd=0.5, stop_dist=0.6, mode="forward", max_fwd=6.0))
++    check(wc.start_auto(), "前進 開始")
++    dt = _wait(wc, 90)
++    print(f"    結果: {wc.auto.result}  FSM={robot.get_fsm_id()}  x={robot._wx:.2f}  所要{dt:.1f}秒")
++    check(wc.auto.result.startswith("完了") and robot.get_fsm_id() == 4, f"止まった後はロック立位 FSM 4(いま {robot.get_fsm_id()})")
++    check(wc.status().get("locked") is True, "状態に locked=True")
++    check(wc.tele(0.3, 0.0, 0.0) is False, "ロック中は十字キーを受けない")
++    robot.sim_obstacles([dict(x=robot._wx + 2.0, y=0.0, w=4.0, d=0.2, h=1.0)])
++    time.sleep(0.6)
++    check(wc.start_auto(), "2 回目の前進 開始(ロック立位から自動で歩行へ)")
++    dt = _wait(wc, 90)
++    print(f"    結果: {wc.auto.result}  FSM={robot.get_fsm_id()}  所要{dt:.1f}秒")
++    check(wc.auto.result.startswith("完了") and robot.get_fsm_id() == 4, "2 回目も完了し、再びロック立位")
++    tk.on = False
++    wc.close()
++
++
 +def test_hb_loss():
 +    print("--- 6. ハートビート途絶 ---")
 +    robot, tk, wc = _setup([dict(x=2.0, y=0.0, w=4.0, d=0.2, h=1.0)],
@@ -6753,6 +6872,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +    test_detour()
 +    test_side()
 +    test_align()
++    test_lock()
 +    test_hb_loss()
 +    print("=" * 60)
 +    if FAIL:
