@@ -50,8 +50,8 @@ WALK_DEFAULTS = dict(
     v_fwd=0.50,        # 前進の巡航速度[m/s](かんたん画面の「速さ」: ゆっくり0.3/ふつう0.5/はやい0.7)
     v_side=0.25,       # 横歩き・後退の巡航速度[m/s](普通の歩行。横は前進より不安定なので低め)
     v_creep=0.15,      # 歩き続けられる最低速度[m/s]。★内蔵歩行は 0.1m/s 未満では歩かない(2026-09-04 実測の疑い)
-    a_dec=0.15,        # 壁・目標へ向けた減速度[m/s²]。v²/(2a) 手前から滑らかに落とす(0.5m/s なら 0.8m 手前)
-    cmd_lag=0.80,      # 内蔵歩行の応答遅れの見込み[s](実測: 指令を変えてから実速度が追いつくまで約 1 秒)。この分だけ早めに減速する
+    a_dec=0.12,        # 壁・目標へ向けた減速度[m/s²]。v²/(2a) 手前から滑らかに落とす(0.35m/s なら 0.5m 手前)
+    cmd_lag=1.50,      # 内蔵歩行の応答遅れの見込み[s](実測: 指令を下げてから実速度が落ちるまで 1.5 秒前後)。実速度×これだけ手前から減速する
     align_wall=True,   # 前進の前に、正面の壁が斜めならその場で回転して正対する(2026-09-04 操作者の指示)
     align_tol_deg=3.0, # 正対したとみなす角度[deg]
     om_turn=0.30,      # 正対の回転速度の上限[rad/s]
@@ -73,6 +73,7 @@ WALK_DEFAULTS = dict(
     cmd_max=0.90,      # 指令の上限[m/s]
     final_zone=0.60,   # 目標までこの距離[m]に入ったら一定のゆっくり歩き(実速度 0.08 目安)で寄せ、残り 8cm で一度だけ止める
     anchor_s=6.0,      # 止めた後、この秒数は位置を見張り、後ろへ 5cm 以上ずれたら前へ寄せ直す(アンカー保持)
+    v_enter_final=0.15,  # 最後のゆっくり歩きに入る条件: オドメトリの実速度がこれ以下[m/s](速いまま入ると止め際に後ろへ踏み出す)
     stop_lock=True,    # 目的地で止まったら足踏みをやめてロック立位(FSM 4)で静止する(操作者の指示 2026-09-04)。
                        #   次の[前進]/[横歩き]は自動で歩行(200)へ戻ってから動く
     yaw_autocal=False, # LiDAR ヨーの自動較正。★壁が主な景色だと壁沿いの平行移動が決まらず ±20° の雑音になった(14:0x)。既定 OFF
@@ -119,7 +120,7 @@ YAW_OM_MAX = 0.30                  # 直進保持の補正上限[rad/s]
 LAT_KP = 0.6                       # 経路線への横ずれ補正[(m/s)/m]
 LAT_VY_MAX = 0.05                  # 同・上限[m/s](望む実速度。較正後の指令は 0.25 程度)
 ACC_UP = 0.50                      # 加速の上限[m/s²](0.5m/s まで 1 秒)
-ACC_DOWN = 0.80                    # 急な減速の上限[m/s²](プロファイル自体は a_dec で滑らか)
+ACC_DOWN = 0.25                    # 望む速度の下げ幅の上限[m/s²]。急に下げると内蔵歩行が踏ん張って後ろへ踏み出す(実機 15:21)
 SEND_HZ = 10.0                     # 速度送信の周期
 CMD_HOLD_S = 0.5                   # 指令の有効期間。これを過ぎたらゼロを送る
 TILT_ABORT_DEG = 25.0              # 歩行中にこれを超えたら自動歩行を止める
@@ -1217,7 +1218,7 @@ class AutoWalk:
                     self._sense()
                     self.io["vel"](sgn * 0.20 if axis == "s" else 0.0, sgn * 0.20 if axis == "e" else 0.0, 0.0)
                 self.io["vel"](0.0, 0.0, 0.0)
-                self._hold(0.8, f"{label}: 停止(残り{rem * 100:+.0f}cm)")
+                self._wait_still(label)
                 self.msg = f"{label}: 到達(残り{rem * 100:+.0f}cm)"
                 return True
             if time.time() - t0 > t_limit:
@@ -1231,6 +1232,32 @@ class AutoWalk:
                 self.io["vel"](c, 0.0, 0.0)
             self.msg = f"{label}: 最後の寄せ 指令{c:+.2f} 残り{rem * 100:+.0f}cm"
             self._rec(final=1, c=round(c, 3), x=round(float(x), 3), rem=round(float(rem), 3))
+
+    def _wait_still(self, label, still_v=0.03, still_s=1.0, t_max=4.0):
+        """速度ゼロを送りながら、オドメトリの実速度が still_v 未満で still_s 秒続くまで待つ(最大 t_max 秒)。
+        止め際の足踏み(内蔵歩行の停止動作)が終わるのを待ってから次(ロック立位)へ進むため"""
+        t0 = time.time()
+        t_still = None
+        od, _o = self._sense()
+        s_prev, e_prev = self._pose(od)
+        t_prev = time.time()
+        while time.time() - t0 < t_max:
+            time.sleep(0.1)
+            od, _o = self._sense()
+            self.io["vel"](0.0, 0.0, 0.0)
+            s, e = self._pose(od)
+            now = time.time()
+            v = math.hypot(s - s_prev, e - e_prev) / max(0.05, now - t_prev)
+            s_prev, e_prev, t_prev = s, e, now
+            if v < still_v:
+                t_still = t_still or now
+                if now - t_still >= still_s:
+                    self.msg = f"{label}: 静止({now - t0:.1f}秒)"
+                    return True
+            else:
+                t_still = None
+            self.msg = f"{label}: 止まるのを待っています(実速度 {v:.2f}m/s)"
+        return False
 
     def _lateral_to(self, e_target, label):
         """経路線からのずれ e を e_target へ。10cm 以上は普通の歩行、未満は小刻みステップ。
@@ -1355,18 +1382,21 @@ class AutoWalk:
         stop_lock=False: アンカー保持(下記)。"""
         if self.p.get("stop_lock", True):
             try:
-                od, _obs = self._sense()
+                od, obs0 = self._sense()
                 s0, e0 = self._pose(od)
+                d0 = obs0.get("wall_dist") if obs0.get("ok") else None
                 self.io["vel"](0.0, 0.0, 0.0)
                 ok = self.io["lock_stand"]()
-                self.io["log"]("足踏みをやめてロック立位(FSM 4)で静止します" + ("" if ok else "(★ロック立位へ入れませんでした)"))
+                self.io["log"]("足踏みをやめてロック立位(FSM 4)へ" + ("切り替えました" if ok else "切り替えられませんでした(★歩行のまま)"))
                 t0 = time.time()
                 while time.time() - t0 < 3.0:
                     time.sleep(0.1)
                     self._sense()
-                od, _obs = self._sense()
+                od, obs1 = self._sense()
                 s1, e1 = self._pose(od)
-                self.io["log"](f"停止後 3 秒の位置変化: 前後 {(s1 - s0) * 100:+.1f}cm 横 {(e1 - e0) * 100:+.1f}cm(ロック立位)")
+                d1 = obs1.get("wall_dist") if obs1.get("ok") else None
+                self.io["log"](f"停止後 3 秒の位置変化: 前後 {(s1 - s0) * 100:+.1f}cm 横 {(e1 - e0) * 100:+.1f}cm"
+                               f"(オドメトリ)  壁までの距離 {d0 if d0 is None else round(d0, 2)}→{d1 if d1 is None else round(d1, 2)}m(LiDAR)")
             except _Abort:
                 pass
             except Exception as ex:                # noqa: BLE001
@@ -1449,6 +1479,8 @@ class AutoWalk:
         t_prev = t_phase
         t_limit = p["max_fwd"] / max(p["v_fwd"], 0.05) * 2.5 + 20.0
         v_min = float(p["v_creep"])
+        self.v_meas = 0.0                           # オドメトリから測った実速度(経路方向、EMA)
+        s_prev = None
         while True:
             time.sleep(0.1)
             now = time.time()
@@ -1458,6 +1490,9 @@ class AutoWalk:
             if now - t_phase > t_limit:
                 raise _Abort(f"中止(FORWARD): 時間切れ({t_limit:.0f}秒)")
             s, e = self._pose(od)
+            if s_prev is not None:
+                self.v_meas = 0.7 * self.v_meas + 0.3 * ((s - s_prev) / dt)
+            s_prev = s
             self.traveled, self.offset = getattr(self, "traveled_base", 0.0) + s, e
             if not obs.get("ok"):
                 self.io["vel"](0.0, 0.0, 0.0)
@@ -1509,7 +1544,8 @@ class AutoWalk:
                 self.v = 0.0
                 return "max"
             # --- 前進速度: 連続プロファイル(回り込み中は veer_v 以下)
-            v_t = speed_profile(p["v_fwd"], d_stop, v_min, p.get("a_dec", 0.25), self.v, p.get("cmd_lag", 0.3))
+            # 減速の見込みには**実速度**を使う(望む速度より実速度の方が高いまま壁へ近づくことがある)
+            v_t = speed_profile(p["v_fwd"], d_stop, v_min, p.get("a_dec", 0.12), max(self.v, self.v_meas), p.get("cmd_lag", 1.5))
             if veer is not None:
                 # 脇へ寄せ切るまでは障害物へ近づくほど落とす(0.35m 手前を基準)。ただし最低 v_min は保つ
                 v_cap = speed_profile(float(p.get("veer_v", 0.35)), None if dist is None else dist - 0.35,
@@ -1523,7 +1559,7 @@ class AutoWalk:
             # --- 最終接近: 残りが final_zone 以内で回り込み中でなければ「最後の一歩」で寄せて自然に止まる
             #     (小さな指令を出し続けると足踏みのまま居座る: 14:09 の実機)
             if (veer is None and d_stop is not None and 0.03 < d_stop <= float(p.get("final_zone", 0.6))
-                    and self.v <= 0.35):
+                    and self.v <= 0.35 and self.v_meas <= float(p.get("v_enter_final", 0.15))):
                 self._final_approach("s", s + d_stop, "壁の手前")     # ★経路座標 s(進み traveled ではない)。後ろへは歩かない
                 self.io["vel"](0.0, 0.0, 0.0)
                 self.v = 0.0
@@ -1687,7 +1723,7 @@ class WalkController:
               "body_half": (0.15, 0.45),
               "speed_mode": (-1, 2), "cmd_dur": (0.5, 5.0),
               "k_vx": (0.15, 1.5), "k_vy": (0.15, 1.5), "v_dead": (0.0, 0.3), "cmd_max": (0.3, 1.2), "final_zone": (0.1, 0.5),
-              "cmd_min_walk": (0.15, 0.6), "anchor_s": (0.0, 20.0),
+              "cmd_min_walk": (0.15, 0.6), "v_enter_final": (0.05, 0.4), "anchor_s": (0.0, 20.0),
               "tele_vx": (0.05, 0.6), "tele_vy": (0.05, 0.3), "tele_om": (0.1, 0.8)}
 
     def __init__(self, robot, log=print, hb_ok=lambda: True, is_sim=False):
@@ -1945,10 +1981,18 @@ class WalkController:
 
     def _lock_stand(self):
         """目的地でロック立位(FSM 4)へ。足踏みをやめてバランスだけで静止する。戻り値: 成功か"""
+        ok = False
         try:
             self.sender.stop("ロック立位へ")
             time.sleep(0.3)
-            ok = bool(self.robot.standard_mode("stand"))
+            for i in range(2):
+                self.robot.standard_mode("stand")
+                time.sleep(1.0)
+                f = self.robot.get_fsm_id()
+                if f == 4:
+                    ok = True
+                    break
+                self.log(f"ロック立位の切替: まだ FSM {f}(試行 {i + 1})")
         except Exception as ex:                    # noqa: BLE001
             self.log(f"★ロック立位へ切り替えられません: {ex}")
             ok = False
