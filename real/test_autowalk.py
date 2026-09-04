@@ -174,7 +174,7 @@ def _setup(boxes, params, hb_ok=True, log=None):
     tk = _Ticker(robot)
     wc = WalkController(robot, log=log or _log, hb_ok=lambda: hb_ok, is_sim=True)
     wc.set_params(params)
-    check(wc.prepare(), "歩行モードへ(4→802)")
+    check(wc.prepare(), "歩行モードへ(4→501)")
     time.sleep(0.6)
     return robot, tk, wc
 

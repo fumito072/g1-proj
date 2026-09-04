@@ -1,7 +1,7 @@
 diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png' -x '*.patch' /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/README.md g1-proj-main/README.md
 --- /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/README.md	2026-09-03 18:26:29.000000000 +0900
-+++ g1-proj-main/README.md	2026-09-04 14:22:17.663899247 +0900
-@@ -7,10 +7,35 @@
++++ g1-proj-main/README.md	2026-09-04 14:31:49.916659700 +0900
+@@ -7,10 +7,36 @@
  
  ---
  
@@ -27,6 +27,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +| 小刻みステップ(9/4 午後) | `real/autowalk.py`(`_step_axis`)、`real/sim_robot.py`、かんたん画面 | 後退ナッジが実機で進まなかった(弱いパルスでは内蔵歩行が一歩も出ない)ため、横歩き・5cm・後退・[1歩] を「確実に一歩出る短い指令→止めてオドメトリで測る」方式に統一。1歩の推定を実測で更新、3歩で進まなければ中止。docs/自動歩行_障害物停止_横移動.md §6b-3。実機未検証 |
 +| 12:36 の転倒の原因と対策 | `real/systemd/*.service`、`real/start_onboard.sh`、`real/cockpit.py` | 再起動後のサービスで制御周期が 23 Hz に落ちガードでダンプ→立位のまま前へ倒れた。jetson_clocks 固定・DDS 環境変数・Nice・走行中の再起動拒否。完了後の既定を元の FSM3 へ戻す。docs/着座_膝と回転の解析_20260904.md §3-0c |
 +| LiDAR の壁距離の作り直し(9/4 午後) | `real/lidar_bridge.py`、`real/autowalk.py`、かんたん画面 | 前方を生座標 +X 固定に(床が見える向きは後ろを向いていた)、つま先基準、壁の面を直線フィット、前後左右の最近距離、[前後を反転]、前進時の自動ヨー較正。docs/自動歩行 §6b-4 |
++| 歩行が始まらない原因と修正(9/4 午後) | `real/real_robot.py`(`ensure_walk_mode`)、`sim_robot.py`、UI 表記 | 802 では SetVelocity が効かない(0.35 m/s×4 秒で 4 cm)。最新 SDK の Start()=SetFsmId(500) に合わせ、歩行は loco 500/501 で行い、802 は着座の UserCtrl 入口だけに。docs/自動歩行 §6b-5。実機未検証 |
 +実機での検証順は 自動歩行 §6(A 距離表示 → B ドライラン → C 十字キー → D 短距離 → E 既定値)。
 +
  ## 引き継ぐ人がまず読むもの(この順で)
@@ -829,8 +830,8 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +  まま(先方のサービス。disable しない)。
 diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png' -x '*.patch' "/tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/docs/\350\207\252\345\213\225\346\255\251\350\241\214_\351\232\234\345\256\263\347\211\251\345\201\234\346\255\242_\346\250\252\347\247\273\345\213\225.md" "g1-proj-main/docs/\350\207\252\345\213\225\346\255\251\350\241\214_\351\232\234\345\256\263\347\211\251\345\201\234\346\255\242_\346\250\252\347\247\273\345\213\225.md"
 --- "/tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/docs/\350\207\252\345\213\225\346\255\251\350\241\214_\351\232\234\345\256\263\347\211\251\345\201\234\346\255\242_\346\250\252\347\247\273\345\213\225.md"	1970-01-01 09:00:00.000000000 +0900
-+++ "g1-proj-main/docs/\350\207\252\345\213\225\346\255\251\350\241\214_\351\232\234\345\256\263\347\211\251\345\201\234\346\255\242_\346\250\252\347\247\273\345\213\225.md"	2026-09-04 14:22:17.663899247 +0900
-@@ -0,0 +1,249 @@
++++ "g1-proj-main/docs/\350\207\252\345\213\225\346\255\251\350\241\214_\351\232\234\345\256\263\347\211\251\345\201\234\346\255\242_\346\250\252\347\247\273\345\213\225.md"	2026-09-04 14:31:49.916659700 +0900
+@@ -0,0 +1,276 @@
 +# 自動歩行 — 前進(壁の手前で自然に停止・障害物は回り込み) / 横歩き(足踏み)(2026-09-04)
 +
 +実装: `real/autowalk.py`(本体)、`real/cockpit.py`(UI と配線)、
@@ -1051,6 +1052,33 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +**現場での確認**: 機体の正面 1 m に立つと「前」が 1.0 前後・「壁」の数字が消えるか小さくなる。
 +後ろに立って「後」が反応すれば向きは合っている。逆なら [⇄ 前後を反転]。前進を一度すれば自動較正のログ
 +「LiDAR のヨーを自動較正」か「向きは合っています」が出る。
++
++
++### 6b-5. 「歩行開始を押しても歩き始めない」の原因 = 802 は速度指令を受けない(2026-09-04 午後)
++
++13:24 の記録: 歩行モード(802)で [前進] を押すと vx が 0.03→0.35 m/s まで上がって 4 秒送られたが、
++オドメトリの進みは 0.044 m。[後ろへ1歩](0.30 m/s×0.6 s)も +1.4 cm。**FSM 802(走行/29dof)では
++SetVelocity(7105) が効かない**。
++
++SDK で確かめたこと:
++- 機体の SDK(obayashi_workspace/unitree_sdk2_python、2026-02-26)の `Start()` は `SetFsmId(200)`。
++  **GitHub 最新の `Start()` は `SetFsmId(500)`**(C++ も同じ。`ContinuousGait` = `SetBalanceMode(1/0)`、
++  `SetSpeedMode` = 7107 が追加されている)。速度指令は Start で入る loco の FSM で受ける。
++- 9/3 のログ: 標準モード [ウォーキング](200)を押すと FSM は **501** と読め、そこから 802 → UserCtrl の
++  着座経路も 0.4 秒で通っている(7 回)。
++
++作り直し(`real_robot.ensure_walk_mode`):
++1. ロック立位(4)から **SetFsmId(500)** → FSM が 500/501 になれば歩行準備 OK(だめなら 200)。
++2. 802/801 に居たら一度 4 へ戻してから 500 へ。
++3. 速度指令はこれまでどおり `SetVelocity(vx, vy, ω, duration=0.5)` を 10 Hz(SDK の `Move()` と同じ API)。
++4. 着座は今までどおり `enter_user_ctrl` が 802 へ遷移してから 7110(9/3 の実績どおり 501→802 も通る)。
++5. `set_gait_continuous(True)` = `SetBalanceMode(1)`(速度ゼロでも足踏みを続ける連続歩容)を用意した。
++   小刻みステップで歩き出しの不感帯が問題なら試す(既定 OFF)。
++
++**実機で確かめる順**(立ち会い、周囲 1 m を空ける、ハーネス推奨):
++1. [スタンドロック] → [歩行モード]。ログに「歩行 FSM 500(または 501)に到達」が出ること。
++2. 十字キー [▲] を 2 秒。歩き出せば OK。次に [右へ1歩] → 「前回 x cm」が 3〜10 cm。
++3. [前進](停止距離 1.0 m から)。壁の手前で減速して止まるか。
 +
 +## 7. 既知の限界
 +
@@ -1384,13 +1412,13 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
  タブを前面に保つこと**。ブラウザはバックグラウンドのタブでタイマーを
 diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png' -x '*.patch' /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/autowalk.py g1-proj-main/real/autowalk.py
 --- /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/autowalk.py	1970-01-01 09:00:00.000000000 +0900
-+++ g1-proj-main/real/autowalk.py	2026-09-04 14:19:08.729202087 +0900
++++ g1-proj-main/real/autowalk.py	2026-09-04 14:30:07.378762300 +0900
 @@ -0,0 +1,1562 @@
 +#!/usr/bin/env python3
 +"""自動歩行(前進 → 壁の手前で自然に停止 / 障害物は回り込んで元の経路へ / 横歩きは
 +細かい足踏み)と、スマホからの手動操作(押している間だけ動く)のための速度送信。
 +
-+★方策(rt/lowcmd)は一切使わない。Unitree内蔵の歩行制御(FSM 500/501/801/802)に
++★方策(rt/lowcmd)は一切使わない。Unitree内蔵の歩行制御(loco FSM 500/501。802 では速度指令が効かない)に
 +  LocoClient.SetVelocity(vx, vy, omega, duration) を10Hzで送るだけ。
 +  バランスは内蔵制御が取る。こちらが送るのは速度の希望値だけ。
 +
@@ -1472,7 +1500,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +    step_max=20,       # 1回の指示で出す最大歩数
 +    step_dir="left",   # mode="step"(1歩だけ)の向き: left/right/back/fwd
 +)
-+WALK_FSMS = {500, 501, 801, 802}   # 速度指令を受ける内蔵FSM(新FW。旧FWは200)
++WALK_FSMS = {200, 500, 501}        # 速度指令を受ける内蔵FSM(loco)。802/801 では効かない(2026-09-04 実測)
 +YAW_KP = 1.6                       # 直進保持のゲイン[(rad/s)/rad](旧コックピット実績値)
 +YAW_OM_MAX = 0.30                  # 直進保持の補正上限[rad/s]
 +LAT_KP = 0.6                       # 経路線への横ずれ補正[(m/s)/m]
@@ -2950,7 +2978,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +        }
 diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png' -x '*.patch' /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/cockpit.py g1-proj-main/real/cockpit.py
 --- /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/cockpit.py	2026-09-03 18:26:29.000000000 +0900
-+++ g1-proj-main/real/cockpit.py	2026-09-04 14:16:27.430123674 +0900
++++ g1-proj-main/real/cockpit.py	2026-09-04 14:30:07.379762300 +0900
 @@ -16,6 +16,7 @@
  import gc
  import json
@@ -3278,7 +3306,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +            self.log(f"★歩行の指定が不正: {arg}")
 +            return
 +        if self.fsm not in ("WALK:ready", "WALK:auto") or not self.walk.ready:
-+            self.log("★先に[歩行モード]を押してください(ロック立位から走行802へ入れます)")
++            self.log("★先に[歩行モード]を押してください(ロック立位から歩行 500/501 へ入れます)")
 +            return
 +        mode = d.get("mode", "forward")
 +        keep = {k: v for k, v in d.items() if k in ("stop_dist", "side_dir", "side_dist",
@@ -3342,7 +3370,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +        items.append([rms < 0.10, f"静止(関節速度RMS {rms:.3f}、0.10未満)"])
 +        f = self.robot.get_fsm_id() if hasattr(self.robot, "get_fsm_id") else None
 +        self._fsm_id = f
-+        items.append([(f is None) or (f in (4, 500, 501, 801, 802, 1000)),
++        items.append([(f is None) or (f in (4, 200, 500, 501, 801, 802, 1000)),
 +                      f"内蔵FSM {f}(立位/歩行/UserCtrlのどれか)" if f is not None
 +                      else "内蔵FSM 読めず(simなど)"])
 +        ye = self._yaw_err_deg()
@@ -3866,11 +3894,11 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
  
 + <div class="sec"><div class="st">5. 歩行(内蔵制御) — スマホ手動操作 / 自動歩行</div>
 +  <div class="row">
-+   <button onclick="cmd('walk_ready')">&#128694; 歩行モードへ(802)</button>
++   <button onclick="cmd('walk_ready')">&#128694; 歩行モードへ(500/501)</button>
 +   <button class="go" id="walk_auto" onclick="startAuto()">&#9654; 自動歩行 開始</button>
 +   <button id="walk_stop" style="background:#7a1b1b;border:none;font-weight:700" onclick="cmd('walk_stop')">&#9632; 歩行停止(速度ゼロ)</button>
 +  </div>
-+  <div class="lbl">★[歩行モードへ]はロック立位(4)から走行(802)へ遷移する。走行制御が動くので
++  <div class="lbl">★[歩行モードへ]はロック立位(4)から歩行 loco(500/501)へ遷移する。802 では速度指令が効かない(9/4 実測)。歩行制御が動くので
 +  <b>機体を接地させ、リモコンのE-STOPを握って</b>押すこと(吊ったままだと空中で暴れる)。
 +  [歩行停止]は速度をゼロにするだけで内蔵バランスは生きている。E-STOPはdampなので<b>歩行中に押すと倒れる</b>。</div>
 +  <div class="row">停止距離 <input id="w_stop" type="number" step="0.05" min="0.3" max="2.5" value="0.60" class="num">m
@@ -4166,7 +4194,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +  <button onclick="cmd('mode_stand')">スタンドロック</button>
 +  <button onclick="cmd('walk_ready')">歩行モード</button>
 + </div>
-+ <div class="st">スタンドロック=立位(FSM4)。歩行モード=走行制御(802)へ。押すと歩き出しうるので接地とE-STOPを確認。</div>
++ <div class="st">スタンドロック=立位(FSM4)。歩行モード=内蔵歩行 loco(500/501)へ。押すと歩き出しうるので接地とE-STOPを確認。着座は自動で 802→UserCtrl を通る。</div>
 +</section>
 +
 +<section><h2>歩く</h2>
@@ -4919,17 +4947,30 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
  # ---------------------------------------------------------------- 7. 実機側
 diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png' -x '*.patch' /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/real_robot.py g1-proj-main/real/real_robot.py
 --- /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/real_robot.py	2026-09-03 18:26:29.000000000 +0900
-+++ g1-proj-main/real/real_robot.py	2026-09-04 10:40:07.314857762 +0900
-@@ -66,6 +66,8 @@
++++ g1-proj-main/real/real_robot.py	2026-09-04 14:30:07.377762300 +0900
+@@ -66,6 +66,12 @@
  #   この窓の間に出しているのは user_lowcmd のストリームだけで、UserCtrlに
  #   入るまでロボットは無視するので、延ばしても機体は動かない。
  USER_CTRL_CONFIRM_S = 6.0
 +# 速度指令(SetVelocity)を受け付ける内蔵歩行のFSM(新FW)。自動歩行・手動操作用
-+WALK_FSMS = {500, 501, 801, 802}
++# ★2026-09-04 午後の実測: 802(走行/29dof)では SetVelocity(7105) が効かない(0.35m/s を 4 秒送って 4cm)。
++#   速度指令を受けるのは loco の 500/501(最新 SDK の Start() = SetFsmId(500)。旧 SDK の Start は 200 で、
++#   当 FW では 200 を送ると 501 と読める)。802 は着座の UserCtrl(7110)への入口としてだけ使う
++WALK_FSMS = {200, 500, 501}
++LOCO_ENTRY_FSMS = (500, 200)      # 歩行へ入れるときに試す順(最新 SDK → 旧 SDK)
  
  
  def _rpc(label, fn, *args, timeout=2.5):
-@@ -449,6 +451,52 @@
+@@ -387,7 +393,7 @@
+         """
+         if self._loco is None:
+             return False
+-        for api in (7001, 7002, 7110, 7111):
++        for api in (7001, 7002, 7107, 7110, 7111):
+             try:
+                 self._loco._RegistApi(api, 0)
+             except Exception:                      # noqa: BLE001
+@@ -449,6 +455,52 @@
          self._use_user_topic = False
          return int(res[0])
  
@@ -4982,7 +5023,20 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
      def current_mode(self, timeout=2.5):
          """内蔵制御サービスの状態を返す(表示用)。'(解放中)' なら未使用。
  
-@@ -872,6 +920,84 @@
+@@ -781,7 +833,11 @@
+         elif name == "stand":
+             ok, _ = _rpc("SetFsmId(4)", self._loco.SetFsmId, 4, timeout=4.0)
+         elif name == "walk":
+-            ok, _ = _rpc("SetFsmId(200)", self._loco.SetFsmId, 200, timeout=4.0)
++            # 最新 SDK の Start() = 500。旧 FW なら 200
++            ok, _ = _rpc("SetFsmId(500)", self._loco.SetFsmId, 500, timeout=4.0)
++            time.sleep(0.6)
++            if self.get_fsm_id() not in WALK_FSMS:
++                ok, _ = _rpc("SetFsmId(200)", self._loco.SetFsmId, 200, timeout=4.0)
+         elif name == "sit":
+             ok, _ = _rpc("SetFsmId(2)", self._loco.SetFsmId, 2, timeout=4.0)
+         elif name == "seated":
+@@ -872,6 +928,97 @@
          if self._loco is not None:
              _rpc_async("Move", self._loco.Move, vx, vy, omega)
  
@@ -5023,13 +5077,14 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +        return OdomReader(sub)
 +
 +    def ensure_walk_mode(self, log=print):
-+        """内蔵の歩行FSM(802。だめなら501)へ入れる。**ロック立位(4)からだけ**遷移する。
++        """内蔵の歩行(loco 500/501)へ入れる。速度指令(SetVelocity)はこの FSM でだけ効く。
 +
-+        ダンピング/ゼロトルクからは自動で立ち上げない(立ち上がりは操作者が
-+        [立つ]を押して目で見ながら行う)。
-+        ★802 は静止していても走行制御が動いている状態。吊った機体を入れると
-+          空中で走行動作を始めて暴れる(実機13:58)。**必ず接地させ、リモコンの
-+          E-STOPを握って**押すこと。2026-09-03 の実機では 4→802 が0.4秒で通っている。
++        遷移元: ロック立位(4)。802/801(走行29dof)に居るときは一度 4 に戻してから入る。
++        ダンピング/ゼロトルクからは自動で立ち上げない(立ち上がりは操作者が[立つ]を押して目で見る)。
++        ★最新 SDK(unitree_sdk2_python master)の Start() は SetFsmId(500)。機体に入っている旧 SDK の
++          Start() は 200 で、当 FW では 200 を送ると 501 と読める(9/3 のログ)。500 → だめなら 200 の順。
++        ★2026-09-04 の実測: 802 では SetVelocity が効かず一歩も出なかった(4→802 の旧経路)。
++        ★歩行制御が動くので、必ず接地させ、リモコンの E-STOP を握って押すこと。
 +        戻り値: (成功か, いまのFSM)
 +        """
 +        if self.custom_active or self._stream_on:
@@ -5041,28 +5096,40 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +        f = self.get_fsm_id()
 +        if f in WALK_FSMS:
 +            return True, f
++        if f in (801, 802):
++            log(f"FSM {f}(走行29dof)は速度指令を受けないので、ロック立位(4)を経て歩行(500)へ入れます")
++            _rpc("SetFsmId(4)", self._loco.SetFsmId, 4, timeout=4.0)
++            t0 = time.time()
++            while time.time() - t0 < 6.0:
++                time.sleep(0.4)
++                f = self.get_fsm_id()
++                if f == 4:
++                    break
++            if f != 4:
++                return False, f"FSM={f}: 4(ロック立位)へ戻せない。[立つ]を押してから"
 +        if f != 4:
 +            return False, f"FSM={f}: 先に[立つ](ロック立位4)で立たせ、接地を確認してから"
-+        log("★FSM 802(走行)へ遷移します — 走行制御が動きます。"
-+            "機体を接地させ、リモコンE-STOPを握ってください")
-+        _rpc("SetFsmId(802)", self._loco.SetFsmId, 802, timeout=4.0)
-+        t0 = time.time()
-+        while time.time() - t0 < 6.0:
-+            time.sleep(0.4)
-+            f = self.get_fsm_id()
-+            if f in WALK_FSMS:
-+                log(f"FSM {f} に到達({time.time() - t0:.1f}秒)")
-+                return True, f
-+        log(f"802へ入れなかった(FSM={f})。501(腰3DoF歩行)を試します")
-+        _rpc("SetFsmId(501)", self._loco.SetFsmId, 501, timeout=4.0)
-+        t0 = time.time()
-+        while time.time() - t0 < 5.0:
-+            time.sleep(0.4)
-+            f = self.get_fsm_id()
-+            if f in WALK_FSMS:
-+                log(f"FSM {f} に到達({time.time() - t0:.1f}秒)")
-+                return True, f
++        for fid in LOCO_ENTRY_FSMS:
++            log(f"★歩行(FSM {fid})へ遷移します — 歩行制御が動きます。機体を接地させ、リモコンE-STOPを握ってください")
++            ok, res = _rpc(f"SetFsmId({fid})", self._loco.SetFsmId, fid, timeout=4.0)
++            t0 = time.time()
++            while time.time() - t0 < 6.0:
++                time.sleep(0.4)
++                f = self.get_fsm_id()
++                if f in WALK_FSMS:
++                    log(f"歩行 FSM {f} に到達({time.time() - t0:.1f}秒)。速度指令が効く状態です")
++                    return True, f
++            log(f"FSM {fid} へ入れなかった(いま {f}、応答 {res})")
 +        return False, f
++
++    def set_gait_continuous(self, flag, log=print):
++        """連続歩容(SetBalanceMode 1 = 速度ゼロでも足踏みを続ける / 0 = 止まる)。歩行 FSM でだけ効く。
++        小刻みステップで「歩き出しの不感帯」を避けたいときに 1 にする(既定 0)"""
++        if self._loco is None:
++            return False
++        ok, res = _rpc("SetBalanceMode", self._loco.SetBalanceMode, 1 if flag else 0, timeout=2.0)
++        log(f"連続歩容: {'ON' if flag else 'OFF'}(SetBalanceMode → {res})")
++        return bool(ok)
 +
      # ---- 共通API
      def state(self):
@@ -5088,7 +5155,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
          with np.load(d / "reference.npz") as _z:
 diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png' -x '*.patch' /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/sim_robot.py g1-proj-main/real/sim_robot.py
 --- /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/sim_robot.py	2026-09-03 18:26:29.000000000 +0900
-+++ g1-proj-main/real/sim_robot.py	2026-09-04 13:15:17.703701475 +0900
++++ g1-proj-main/real/sim_robot.py	2026-09-04 14:30:07.377762300 +0900
 @@ -5,6 +5,7 @@
  500Hz相当でPD制御しながら物理を進める。実機なしでコックピットの
  FSM・観測構築・UI・安全系を通しで検証できる(WP6の「DDSモック」)。
@@ -5210,7 +5277,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
      def standard_mode(self, name):
          self.custom_active = False
 +        self.walk_mode = (name == "walk")
-+        self._fsm_id = {"zero": 0, "damp": 1, "stand": 4, "walk": 802,
++        self._fsm_id = {"zero": 0, "damp": 1, "stand": 4, "walk": 501,
 +                        "sit": 2, "seated": 3}.get(name, self._fsm_id)
 +        # ★2026-09-04 内蔵バランス制御の近似: 立位/歩行/スクワット/着座の標準モード中は
 +        #   物理を進めず、直立で固定する(以前は素のPD保持で数秒で倒れ、手順の練習=
@@ -5222,7 +5289,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
          if name == "zero":
              self.set_target(np.zeros(29), np.zeros(29), np.zeros(29))
          elif name == "damp":
-@@ -210,7 +311,68 @@
+@@ -210,7 +311,72 @@
          return True
  
      def loco_move(self, vx, vy, omega):
@@ -5272,13 +5339,17 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +    def ensure_walk_mode(self, log=print):
 +        if self.custom_active:
 +            return False, "方策側が制御権を持っています"
-+        if self._fsm_id not in (4, 500, 501, 801, 802):
++        if self._fsm_id not in (4, 200, 500, 501, 801, 802):
 +            return False, f"FSM={self._fsm_id}: 先に[立つ](ロック立位4)で立たせてから"
-+        self._fsm_id = 802
++        self._fsm_id = 501                        # 実機: SetFsmId(500) → 501 と読める
 +        self.walk_mode = True
 +        self._upright()
-+        log("(sim) 歩行モード 802 に入りました(運動学モック。バランス制御は模さない)")
-+        return True, 802
++        log("(sim) 歩行 FSM 501 に入りました(運動学モック。バランス制御は模さない)")
++        return True, 501
++
++    def set_gait_continuous(self, flag, log=print):
++        log(f"(sim) 連続歩容 {'ON' if flag else 'OFF'}")
++        return True
 +
 +    def open_lidar(self):
 +        return _SimLidar(self)
@@ -5292,7 +5363,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
  
      # ---- モック専用
      def place(self, qpos_joints, quat, xy, z):
-@@ -245,6 +407,27 @@
+@@ -245,6 +411,27 @@
      def tick(self, n_sub=10):
          """1制御ステップぶん(既定10サブステップ=20ms相当)物理を進める。
          エンジンの50Hzループから呼ぶ(論理時間。壁時計に依存しない)"""
@@ -5703,7 +5774,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +WantedBy=multi-user.target
 diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png' -x '*.patch' /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/test_autowalk.py g1-proj-main/real/test_autowalk.py
 --- /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/test_autowalk.py	1970-01-01 09:00:00.000000000 +0900
-+++ g1-proj-main/real/test_autowalk.py	2026-09-04 14:16:44.220754168 +0900
++++ g1-proj-main/real/test_autowalk.py	2026-09-04 14:30:22.944758602 +0900
 @@ -0,0 +1,315 @@
 +#!/usr/bin/env python3
 +"""autowalk の机上試験(実機不要・1〜2分)。
@@ -5881,7 +5952,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +    tk = _Ticker(robot)
 +    wc = WalkController(robot, log=log or _log, hb_ok=lambda: hb_ok, is_sim=True)
 +    wc.set_params(params)
-+    check(wc.prepare(), "歩行モードへ(4→802)")
++    check(wc.prepare(), "歩行モードへ(4→501)")
 +    time.sleep(0.6)
 +    return robot, tk, wc
 +

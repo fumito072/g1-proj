@@ -67,7 +67,11 @@ GUARD_NAN_TRIP = 3
 #   入るまでロボットは無視するので、延ばしても機体は動かない。
 USER_CTRL_CONFIRM_S = 6.0
 # 速度指令(SetVelocity)を受け付ける内蔵歩行のFSM(新FW)。自動歩行・手動操作用
-WALK_FSMS = {500, 501, 801, 802}
+# ★2026-09-04 午後の実測: 802(走行/29dof)では SetVelocity(7105) が効かない(0.35m/s を 4 秒送って 4cm)。
+#   速度指令を受けるのは loco の 500/501(最新 SDK の Start() = SetFsmId(500)。旧 SDK の Start は 200 で、
+#   当 FW では 200 を送ると 501 と読める)。802 は着座の UserCtrl(7110)への入口としてだけ使う
+WALK_FSMS = {200, 500, 501}
+LOCO_ENTRY_FSMS = (500, 200)      # 歩行へ入れるときに試す順(最新 SDK → 旧 SDK)
 
 
 def _rpc(label, fn, *args, timeout=2.5):
@@ -389,7 +393,7 @@ class RealRobot:
         """
         if self._loco is None:
             return False
-        for api in (7001, 7002, 7110, 7111):
+        for api in (7001, 7002, 7107, 7110, 7111):
             try:
                 self._loco._RegistApi(api, 0)
             except Exception:                      # noqa: BLE001
@@ -829,7 +833,11 @@ class RealRobot:
         elif name == "stand":
             ok, _ = _rpc("SetFsmId(4)", self._loco.SetFsmId, 4, timeout=4.0)
         elif name == "walk":
-            ok, _ = _rpc("SetFsmId(200)", self._loco.SetFsmId, 200, timeout=4.0)
+            # 最新 SDK の Start() = 500。旧 FW なら 200
+            ok, _ = _rpc("SetFsmId(500)", self._loco.SetFsmId, 500, timeout=4.0)
+            time.sleep(0.6)
+            if self.get_fsm_id() not in WALK_FSMS:
+                ok, _ = _rpc("SetFsmId(200)", self._loco.SetFsmId, 200, timeout=4.0)
         elif name == "sit":
             ok, _ = _rpc("SetFsmId(2)", self._loco.SetFsmId, 2, timeout=4.0)
         elif name == "seated":
@@ -957,13 +965,14 @@ class RealRobot:
         return OdomReader(sub)
 
     def ensure_walk_mode(self, log=print):
-        """内蔵の歩行FSM(802。だめなら501)へ入れる。**ロック立位(4)からだけ**遷移する。
+        """内蔵の歩行(loco 500/501)へ入れる。速度指令(SetVelocity)はこの FSM でだけ効く。
 
-        ダンピング/ゼロトルクからは自動で立ち上げない(立ち上がりは操作者が
-        [立つ]を押して目で見ながら行う)。
-        ★802 は静止していても走行制御が動いている状態。吊った機体を入れると
-          空中で走行動作を始めて暴れる(実機13:58)。**必ず接地させ、リモコンの
-          E-STOPを握って**押すこと。2026-09-03 の実機では 4→802 が0.4秒で通っている。
+        遷移元: ロック立位(4)。802/801(走行29dof)に居るときは一度 4 に戻してから入る。
+        ダンピング/ゼロトルクからは自動で立ち上げない(立ち上がりは操作者が[立つ]を押して目で見る)。
+        ★最新 SDK(unitree_sdk2_python master)の Start() は SetFsmId(500)。機体に入っている旧 SDK の
+          Start() は 200 で、当 FW では 200 を送ると 501 と読める(9/3 のログ)。500 → だめなら 200 の順。
+        ★2026-09-04 の実測: 802 では SetVelocity が効かず一歩も出なかった(4→802 の旧経路)。
+        ★歩行制御が動くので、必ず接地させ、リモコンの E-STOP を握って押すこと。
         戻り値: (成功か, いまのFSM)
         """
         if self.custom_active or self._stream_on:
@@ -975,28 +984,40 @@ class RealRobot:
         f = self.get_fsm_id()
         if f in WALK_FSMS:
             return True, f
+        if f in (801, 802):
+            log(f"FSM {f}(走行29dof)は速度指令を受けないので、ロック立位(4)を経て歩行(500)へ入れます")
+            _rpc("SetFsmId(4)", self._loco.SetFsmId, 4, timeout=4.0)
+            t0 = time.time()
+            while time.time() - t0 < 6.0:
+                time.sleep(0.4)
+                f = self.get_fsm_id()
+                if f == 4:
+                    break
+            if f != 4:
+                return False, f"FSM={f}: 4(ロック立位)へ戻せない。[立つ]を押してから"
         if f != 4:
             return False, f"FSM={f}: 先に[立つ](ロック立位4)で立たせ、接地を確認してから"
-        log("★FSM 802(走行)へ遷移します — 走行制御が動きます。"
-            "機体を接地させ、リモコンE-STOPを握ってください")
-        _rpc("SetFsmId(802)", self._loco.SetFsmId, 802, timeout=4.0)
-        t0 = time.time()
-        while time.time() - t0 < 6.0:
-            time.sleep(0.4)
-            f = self.get_fsm_id()
-            if f in WALK_FSMS:
-                log(f"FSM {f} に到達({time.time() - t0:.1f}秒)")
-                return True, f
-        log(f"802へ入れなかった(FSM={f})。501(腰3DoF歩行)を試します")
-        _rpc("SetFsmId(501)", self._loco.SetFsmId, 501, timeout=4.0)
-        t0 = time.time()
-        while time.time() - t0 < 5.0:
-            time.sleep(0.4)
-            f = self.get_fsm_id()
-            if f in WALK_FSMS:
-                log(f"FSM {f} に到達({time.time() - t0:.1f}秒)")
-                return True, f
+        for fid in LOCO_ENTRY_FSMS:
+            log(f"★歩行(FSM {fid})へ遷移します — 歩行制御が動きます。機体を接地させ、リモコンE-STOPを握ってください")
+            ok, res = _rpc(f"SetFsmId({fid})", self._loco.SetFsmId, fid, timeout=4.0)
+            t0 = time.time()
+            while time.time() - t0 < 6.0:
+                time.sleep(0.4)
+                f = self.get_fsm_id()
+                if f in WALK_FSMS:
+                    log(f"歩行 FSM {f} に到達({time.time() - t0:.1f}秒)。速度指令が効く状態です")
+                    return True, f
+            log(f"FSM {fid} へ入れなかった(いま {f}、応答 {res})")
         return False, f
+
+    def set_gait_continuous(self, flag, log=print):
+        """連続歩容(SetBalanceMode 1 = 速度ゼロでも足踏みを続ける / 0 = 止まる)。歩行 FSM でだけ効く。
+        小刻みステップで「歩き出しの不感帯」を避けたいときに 1 にする(既定 0)"""
+        if self._loco is None:
+            return False
+        ok, res = _rpc("SetBalanceMode", self._loco.SetBalanceMode, 1 if flag else 0, timeout=2.0)
+        log(f"連続歩容: {'ON' if flag else 'OFF'}(SetBalanceMode → {res})")
+        return bool(ok)
 
     # ---- 共通API
     def state(self):

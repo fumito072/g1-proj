@@ -287,7 +287,7 @@ class SimRobot:
     def standard_mode(self, name):
         self.custom_active = False
         self.walk_mode = (name == "walk")
-        self._fsm_id = {"zero": 0, "damp": 1, "stand": 4, "walk": 802,
+        self._fsm_id = {"zero": 0, "damp": 1, "stand": 4, "walk": 501,
                         "sit": 2, "seated": 3}.get(name, self._fsm_id)
         # ★2026-09-04 内蔵バランス制御の近似: 立位/歩行/スクワット/着座の標準モード中は
         #   物理を進めず、直立で固定する(以前は素のPD保持で数秒で倒れ、手順の練習=
@@ -356,13 +356,17 @@ class SimRobot:
     def ensure_walk_mode(self, log=print):
         if self.custom_active:
             return False, "方策側が制御権を持っています"
-        if self._fsm_id not in (4, 500, 501, 801, 802):
+        if self._fsm_id not in (4, 200, 500, 501, 801, 802):
             return False, f"FSM={self._fsm_id}: 先に[立つ](ロック立位4)で立たせてから"
-        self._fsm_id = 802
+        self._fsm_id = 501                        # 実機: SetFsmId(500) → 501 と読める
         self.walk_mode = True
         self._upright()
-        log("(sim) 歩行モード 802 に入りました(運動学モック。バランス制御は模さない)")
-        return True, 802
+        log("(sim) 歩行 FSM 501 に入りました(運動学モック。バランス制御は模さない)")
+        return True, 501
+
+    def set_gait_continuous(self, flag, log=print):
+        log(f"(sim) 連続歩容 {'ON' if flag else 'OFF'}")
+        return True
 
     def open_lidar(self):
         return _SimLidar(self)

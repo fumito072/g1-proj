@@ -1074,7 +1074,7 @@ class Engine:
             self.log(f"★歩行の指定が不正: {arg}")
             return
         if self.fsm not in ("WALK:ready", "WALK:auto") or not self.walk.ready:
-            self.log("★先に[歩行モード]を押してください(ロック立位から走行802へ入れます)")
+            self.log("★先に[歩行モード]を押してください(ロック立位から歩行 500/501 へ入れます)")
             return
         mode = d.get("mode", "forward")
         keep = {k: v for k, v in d.items() if k in ("stop_dist", "side_dir", "side_dist",
@@ -1138,7 +1138,7 @@ class Engine:
         items.append([rms < 0.10, f"静止(関節速度RMS {rms:.3f}、0.10未満)"])
         f = self.robot.get_fsm_id() if hasattr(self.robot, "get_fsm_id") else None
         self._fsm_id = f
-        items.append([(f is None) or (f in (4, 500, 501, 801, 802, 1000)),
+        items.append([(f is None) or (f in (4, 200, 500, 501, 801, 802, 1000)),
                       f"内蔵FSM {f}(立位/歩行/UserCtrlのどれか)" if f is not None
                       else "内蔵FSM 読めず(simなど)"])
         ye = self._yaw_err_deg()
@@ -2869,11 +2869,11 @@ table.st td{text-align:right;padding:3px 6px;border-top:1px solid var(--line);wh
 
  <div class="sec"><div class="st">5. 歩行(内蔵制御) — スマホ手動操作 / 自動歩行</div>
   <div class="row">
-   <button onclick="cmd('walk_ready')">&#128694; 歩行モードへ(802)</button>
+   <button onclick="cmd('walk_ready')">&#128694; 歩行モードへ(500/501)</button>
    <button class="go" id="walk_auto" onclick="startAuto()">&#9654; 自動歩行 開始</button>
    <button id="walk_stop" style="background:#7a1b1b;border:none;font-weight:700" onclick="cmd('walk_stop')">&#9632; 歩行停止(速度ゼロ)</button>
   </div>
-  <div class="lbl">★[歩行モードへ]はロック立位(4)から走行(802)へ遷移する。走行制御が動くので
+  <div class="lbl">★[歩行モードへ]はロック立位(4)から歩行 loco(500/501)へ遷移する。802 では速度指令が効かない(9/4 実測)。歩行制御が動くので
   <b>機体を接地させ、リモコンのE-STOPを握って</b>押すこと(吊ったままだと空中で暴れる)。
   [歩行停止]は速度をゼロにするだけで内蔵バランスは生きている。E-STOPはdampなので<b>歩行中に押すと倒れる</b>。</div>
   <div class="row">停止距離 <input id="w_stop" type="number" step="0.05" min="0.3" max="2.5" value="0.60" class="num">m
@@ -3390,7 +3390,7 @@ input[type=number]{width:84px}
   <button onclick="cmd('mode_stand')">スタンドロック</button>
   <button onclick="cmd('walk_ready')">歩行モード</button>
  </div>
- <div class="st">スタンドロック=立位(FSM4)。歩行モード=走行制御(802)へ。押すと歩き出しうるので接地とE-STOPを確認。</div>
+ <div class="st">スタンドロック=立位(FSM4)。歩行モード=内蔵歩行 loco(500/501)へ。押すと歩き出しうるので接地とE-STOPを確認。着座は自動で 802→UserCtrl を通る。</div>
 </section>
 
 <section><h2>歩く</h2>

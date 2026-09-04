@@ -2,7 +2,7 @@
 """自動歩行(前進 → 壁の手前で自然に停止 / 障害物は回り込んで元の経路へ / 横歩きは
 細かい足踏み)と、スマホからの手動操作(押している間だけ動く)のための速度送信。
 
-★方策(rt/lowcmd)は一切使わない。Unitree内蔵の歩行制御(FSM 500/501/801/802)に
+★方策(rt/lowcmd)は一切使わない。Unitree内蔵の歩行制御(loco FSM 500/501。802 では速度指令が効かない)に
   LocoClient.SetVelocity(vx, vy, omega, duration) を10Hzで送るだけ。
   バランスは内蔵制御が取る。こちらが送るのは速度の希望値だけ。
 
@@ -84,7 +84,7 @@ WALK_DEFAULTS = dict(
     step_max=20,       # 1回の指示で出す最大歩数
     step_dir="left",   # mode="step"(1歩だけ)の向き: left/right/back/fwd
 )
-WALK_FSMS = {500, 501, 801, 802}   # 速度指令を受ける内蔵FSM(新FW。旧FWは200)
+WALK_FSMS = {200, 500, 501}        # 速度指令を受ける内蔵FSM(loco)。802/801 では効かない(2026-09-04 実測)
 YAW_KP = 1.6                       # 直進保持のゲイン[(rad/s)/rad](旧コックピット実績値)
 YAW_OM_MAX = 0.30                  # 直進保持の補正上限[rad/s]
 LAT_KP = 0.6                       # 経路線への横ずれ補正[(m/s)/m]
