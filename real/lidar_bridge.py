@@ -93,16 +93,25 @@ class Mount:
         except Exception:                          # noqa: BLE001
             pass
 
-    def estimate(self, P):
-        """P (N,3) 生座標。RANSACで最大平面(=床)を探し、原点が上側になる法線を取る。
-        床の点の方位の平均を前方にする。成功したら True"""
+    def estimate(self, P, prior_h=None):
+        """P (N,3) 生座標。床平面を RANSAC で探して水平化の回転を作る。成功したら True。
+        ★2026-09-04 午後の見直し:
+          - 床の候補は「法線がセンサの z 軸から 30 度以内」かつ「センサからの高さ 0.9〜1.6m」に限る
+            (机の天板やスロープを床と誤認して 8 度傾いた実測があった)
+          - 前方 = 生座標の +X 軸を床面へ射影したもの(取り付けは固定なので毎回同じになる)。
+            以前の「床が見える向きの平均」は部屋の物で 30 度近く変わった(実測)。
+            前後が逆なら lidar_mount.json の yaw_offset_deg=180(かんたん画面の[前後を反転]が書く)"""
         r = np.linalg.norm(P, axis=1)
         Q = P[(r > 0.4) & (r < 5.0)]
         if len(Q) < 800:
             return False
         rng = np.random.default_rng(0)
         best_n, best_c, best_cnt = None, 0.0, 0
-        idx = rng.integers(0, len(Q), size=(400, 3))
+        idx = rng.integers(0, len(Q), size=(600, 3))
+        zax = np.array([0.0, 0.0, 1.0])
+        # ★取り付けは剛体で上下逆(床の法線 ≈ −z_raw)。ただし機体の前傾(802 の立ち方で 5〜9 度)が
+        #   そのまま乗るので、法線が z_raw から 20 度以内の面を床の候補にする(机・スロープは弾く)
+        cos30 = math.cos(math.radians(20.0))
         for a, b, c in idx:
             p0, p1, p2 = Q[a], Q[b], Q[c]
             n = np.cross(p1 - p0, p2 - p0)
@@ -110,44 +119,59 @@ class Mount:
             if nn < 1e-6:
                 continue
             n /= nn
+            if abs(float(n @ zax)) < cos30:       # センサの z 軸から 30 度以上ずれた面は床ではない
+                continue
             cc = -float(n @ p0)
-            if n @ np.zeros(3) + cc < 0:          # 原点が正側(=法線がセンサへ向く=上)になるように
+            if cc < 0:                            # 原点(センサ)が正側 = 法線がセンサへ向く = 上
                 n, cc = -n, -cc
+            if not (0.9 < cc < 1.6):              # センサの高さとして妥当な範囲
+                continue
+            if prior_h is not None and abs(cc - prior_h) > 0.25:
+                continue
             dist = np.abs(Q @ n + cc)
             cnt = int((dist < 0.03).sum())
             if cnt > best_cnt:
                 best_n, best_c, best_cnt = n, cc, cnt
-        if best_n is None or best_cnt < 0.10 * len(Q):
-            return False
-        # 精密化(内点でLSQ)
+        if best_n is None or best_cnt < 0.08 * len(Q):
+            # 床が取れない: 水平取り付け(法線 = −z_raw)として高さは事前値か 1.27m を使う(安全側の既定)
+            n = np.array([0.0, 0.0, -1.0])
+            h = float(prior_h if prior_h else 1.27)
+            fwd = np.array([1.0, 0.0, 0.0])
+            if abs(self.yaw_offset) > 1e-6:
+                c, s_ = math.cos(self.yaw_offset), math.sin(self.yaw_offset)
+                fwd = c * fwd + s_ * np.cross(n, fwd)
+            left = np.cross(n, fwd)
+            self.R = np.stack([fwd, left, n])
+            self.info = dict(height=round(h, 3), tilt_deg=0.0, fwd_raw=[round(float(v), 3) for v in fwd],
+                             up_raw=[0.0, 0.0, -1.0], n_floor=0,
+                             yaw_offset_deg=round(math.degrees(self.yaw_offset), 1), axis="+X_raw(床なし)")
+            return True
         inl = Q[np.abs(Q @ best_n + best_c) < 0.03]
         cen = inl.mean(axis=0)
         u, s, vt = np.linalg.svd(inl - cen, full_matrices=False)
         n = vt[2]
         if n @ (-cen) < 0:                        # 原点(センサ)が平面より上
             n = -n
-        h = float(abs(n @ cen))                   # センサの床からの高さ
-        if not (0.4 < h < 2.0):
+        h = float(abs(n @ cen))
+        if not (0.9 < h < 1.6):
             return False
-        # 前方 = 床の点の水平方向の平均
-        horiz = inl - np.outer(inl @ n, n)
-        fwd = horiz.mean(axis=0)
-        fwd -= n * (fwd @ n)
+        # 前方 = 生座標 +X を床面へ射影(固定)。ヨーの上書きは lidar_mount.json
+        fwd = np.array([1.0, 0.0, 0.0]) - n * float(n @ np.array([1.0, 0.0, 0.0]))
         if np.linalg.norm(fwd) < 0.05:
             return False
         fwd /= np.linalg.norm(fwd)
-        # ヨーの上書き(lidar_mount.json)
         if abs(self.yaw_offset) > 1e-6:
             c, s_ = math.cos(self.yaw_offset), math.sin(self.yaw_offset)
             left = np.cross(n, fwd)
             fwd = c * fwd + s_ * left
         left = np.cross(n, fwd)
-        self.R = np.stack([fwd, left, n])         # 行 = 新しい軸(旧座標で表現)
+        self.R = np.stack([fwd, left, n])
         tilt = math.degrees(math.acos(min(1.0, abs(float(n[2])))))
         self.info = dict(height=round(h, 3), tilt_deg=round(tilt, 1),
                          fwd_raw=[round(float(v), 3) for v in fwd],
                          up_raw=[round(float(v), 3) for v in n],
-                         n_floor=int(len(inl)), yaw_offset_deg=round(math.degrees(self.yaw_offset), 1))
+                         n_floor=int(len(inl)), yaw_offset_deg=round(math.degrees(self.yaw_offset), 1),
+                         axis="+X_raw")
         return True
 
     def apply(self, P):
@@ -264,6 +288,16 @@ class Bridge:
                             if self.verbose:
                                 print(f"取り付け推定: {self.mount.info}", flush=True)
                         acc = acc[-3:]
+                if self.mount_ok and now - getattr(self, "_t_reest", t0) > 60.0:
+                    # 60 秒ごとに再推定し、床の内点が 2 割以上増えるなら差し替える(最初の推定が
+                    # 机や人で汚れていた場合の保険)。高さは前回の値の ±25cm に限る
+                    self._t_reest = now
+                    m2 = Mount()
+                    if (m2.estimate(P[:, :3], prior_h=self.mount.info.get("height"))
+                            and m2.info["n_floor"] > 1.2 * self.mount.info.get("n_floor", 0)):
+                        self.mount = m2
+                        if self.verbose:
+                            print(f"取り付け再推定: {self.mount.info}", flush=True)
                 if self.mount_ok:
                     P = np.concatenate([self.mount.apply(P[:, :3]), P[:, 3:4]], 1).astype(np.float32)
                     frame_id = "livox_level"

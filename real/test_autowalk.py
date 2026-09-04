@@ -100,8 +100,34 @@ def test_detector():
     check(r4["ok"] and r4["frame"] == "sensor", f"センサ座標の点群を扱える {r4['why']}")
     check(r4["floor_ok"] and abs(r4["floor_h"] - 1.15) < 0.08,
           f"センサ座標: 床までの高さ {r4['floor_h']} (期待1.15±0.08)")
-    check(r4["dist"] is not None and abs(r4["dist"] - 1.20) < 0.10,
-          f"センサ座標(傾き10度): 前方距離 {r4['dist']} (期待1.20±0.10)")
+    check(r4["dist"] is not None and abs(r4["dist"] - 0.95) < 0.10,
+          f"センサ座標(傾き10度): 前方距離 {r4['dist']} (期待0.95±0.10 = 1.20 − つま先0.15 − センサ0.10)")
+    # 壁(幅4m)をセンサ座標で: 壁の面フィット・4方向・ヨー補正(2026-09-04 午後)
+    bodyw = make_world_cloud(rng, (0.0, 0.0), 1.50, 0.0, box_w=4.0)
+    Pw = bodyw.astype(np.float64)
+    Pw[:, 0] -= SENSOR_FWD_OFFSET
+    Pw[:, 2] -= 1.15
+    xs = cx * Pw[:, 0] - sx * Pw[:, 2]
+    zs = sx * Pw[:, 0] + cx * Pw[:, 2]
+    sensw = np.stack([xs, Pw[:, 1], zs], 1).astype(np.float32)
+    det3 = ObstacleDetector(WALK_DEFAULTS)
+    r5 = det3.update(sensw, "livox_level", None, None, side_dir=1)
+    exp = 1.50 - SENSOR_FWD_OFFSET - WALK_DEFAULTS["front_offset"]
+    check(r5["wall_dist"] is not None and abs(r5["wall_dist"] - exp) < 0.10,
+          f"壁の面フィット: {r5['wall_dist']} (期待{exp:.2f}±0.10) 角度{r5['wall_ang']} 幅{r5['wall_len']}")
+    d = r5.get("dirs") or {}
+    check(d.get("front") is not None and abs(d["front"] - (1.50 - SENSOR_FWD_OFFSET)) < 0.15,
+          f"4方向: 前 {d.get('front')} (期待{1.50 - SENSOR_FWD_OFFSET:.2f}±0.15) 後 {d.get('back')} 左 {d.get('left')} 右 {d.get('right')}")
+    # センサがヨー +30 度回って付いている → yaw_fix_deg=-30 で同じ距離になる
+    th2 = math.radians(30.0)
+    c2, s2 = math.cos(th2), math.sin(th2)
+    rot = np.stack([c2 * sensw[:, 0] - s2 * sensw[:, 1], s2 * sensw[:, 0] + c2 * sensw[:, 1], sensw[:, 2]], 1).astype(np.float32)
+    cfg = dict(WALK_DEFAULTS)
+    cfg["yaw_fix_deg"] = -30.0
+    det4 = ObstacleDetector(cfg)
+    r6 = det4.update(rot, "livox_level", None, None, side_dir=1)
+    check(r6["wall_dist"] is not None and abs(r6["wall_dist"] - exp) < 0.10 and abs(r6["wall_ang"] or 0) < 6,
+          f"ヨー補正 -30度: 壁 {r6['wall_dist']} (期待{exp:.2f}±0.10) 壁の角度 {r6['wall_ang']} (期待≈0)")
 
 
 def test_deadman():

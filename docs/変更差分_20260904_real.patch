@@ -1,7 +1,7 @@
 diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png' -x '*.patch' /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/README.md g1-proj-main/README.md
 --- /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/README.md	2026-09-03 18:26:29.000000000 +0900
-+++ g1-proj-main/README.md	2026-09-04 13:54:20.326558263 +0900
-@@ -7,10 +7,34 @@
++++ g1-proj-main/README.md	2026-09-04 14:22:17.663899247 +0900
+@@ -7,10 +7,35 @@
  
  ---
  
@@ -26,6 +26,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +| 着座の修正(9/4 午後) | `real/cockpit.py` | 接触後フェードは実機で 3/3 崩れた(誤検知で残差が消えロール33°・ヨー90°)→ **既定 OFF**、検知にゲート。完了時に座面に載っている証拠が無ければ自動ダンプを保留(赤帯)。docs/着座_膝と回転の解析_20260904.md §3-0b |
 +| 小刻みステップ(9/4 午後) | `real/autowalk.py`(`_step_axis`)、`real/sim_robot.py`、かんたん画面 | 後退ナッジが実機で進まなかった(弱いパルスでは内蔵歩行が一歩も出ない)ため、横歩き・5cm・後退・[1歩] を「確実に一歩出る短い指令→止めてオドメトリで測る」方式に統一。1歩の推定を実測で更新、3歩で進まなければ中止。docs/自動歩行_障害物停止_横移動.md §6b-3。実機未検証 |
 +| 12:36 の転倒の原因と対策 | `real/systemd/*.service`、`real/start_onboard.sh`、`real/cockpit.py` | 再起動後のサービスで制御周期が 23 Hz に落ちガードでダンプ→立位のまま前へ倒れた。jetson_clocks 固定・DDS 環境変数・Nice・走行中の再起動拒否。完了後の既定を元の FSM3 へ戻す。docs/着座_膝と回転の解析_20260904.md §3-0c |
++| LiDAR の壁距離の作り直し(9/4 午後) | `real/lidar_bridge.py`、`real/autowalk.py`、かんたん画面 | 前方を生座標 +X 固定に(床が見える向きは後ろを向いていた)、つま先基準、壁の面を直線フィット、前後左右の最近距離、[前後を反転]、前進時の自動ヨー較正。docs/自動歩行 §6b-4 |
 +実機での検証順は 自動歩行 §6(A 距離表示 → B ドライラン → C 十字キー → D 短距離 → E 既定値)。
 +
  ## 引き継ぐ人がまず読むもの(この順で)
@@ -640,7 +641,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +echo "Android: 機体と同じWi-Fi(SSID SPW_X11_fce0f9)に接続して http://192.168.179.100:8090 を開く"
 diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png' -x '*.patch' "/tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/docs/Android\347\204\241\347\267\232\346\223\215\344\275\234.md" "g1-proj-main/docs/Android\347\204\241\347\267\232\346\223\215\344\275\234.md"
 --- "/tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/docs/Android\347\204\241\347\267\232\346\223\215\344\275\234.md"	1970-01-01 09:00:00.000000000 +0900
-+++ "g1-proj-main/docs/Android\347\204\241\347\267\232\346\223\215\344\275\234.md"	2026-09-04 12:22:06.714599981 +0900
++++ "g1-proj-main/docs/Android\347\204\241\347\267\232\346\223\215\344\275\234.md"	2026-09-04 14:22:17.663899247 +0900
 @@ -0,0 +1,141 @@
 +# Android から無線でコックピットを操作する(2026-09-04 整備)
 +
@@ -685,7 +686,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +| 上部タイル | FSM / 傾き / 制御(Hz) / **通信**(ブラウザから見た /state の成否) |
 +| 判定バー | ● 実行してよい / ▲ 要注意 / ■ 実行できません(理由つき)。通信が途絶えていた直後は黄色の帯で「x 秒途絶・途絶中の対応」 |
 +| 基本操作 | **ダンプ / スタンドロック(FSM4) / 歩行モード(802)** |
-+| 歩く | **壁の手前で止まる距離**・**横歩きの向きと距離**・障害物の回り込み on/off。**[▲ 前進]**(壁の手前で段階的に減速して停止、壁以外は回り込み)、**[◀▶ 横歩き]**(足踏みパルスで指定距離)、**[左へ5cm][右へ5cm]**(微調整)、**[■ 歩行停止]**。**「前の壁までの距離」**の大きな数字(LiDAR は起動時から自動で読む。赤=停止距離以内、黄=手前0.5m、緑=余裕)。上面図などの可視化は無し(操作者の指示) |
++| 歩く | **壁の手前で止まる距離**・**横歩きの向きと距離**・障害物の回り込み on/off。**[▲ 前進]**(壁の手前で段階的に減速して停止、壁以外は回り込み)、**[◀▶ 横歩き]**(足踏みパルスで指定距離)、**[左へ5cm][右へ5cm]**(微調整)、**[■ 歩行停止]**。**「正面の壁までの距離」**の大きな数字(壁の面を当てて、つま先から。LiDAR は起動時から自動で読む。赤=停止距離以内、黄=手前0.5m、緑=余裕)。手前に物があれば別行で「手前 x m に障害物」。**前/後/左/右の最近距離**と **[⇄ 前後を反転]**(数字が後ろの壁と合っているとき)。前進すると向きを自動較正。上面図などの可視化は無し(操作者の指示) |
 +| 座る | 方策の選択、**[▼ 後ろへ5cm/10cm]**(歩行モードで椅子との距離を詰める)、**[着座（この位置でよいか確認）]** → サーバ側の点検(○×△)→ 操作者の3項目チェック → **3秒カウントダウン**(やめるで中止)→ 着座開始 |
 +| 通信が切れたときの動作 | いまの状態で切れたら何をするかを常に表示(docs/通信途絶時の安全設計_20260904.md) |
 +| 画面下の固定バー | **E-STOP** と **歩行停止** |
@@ -828,8 +829,8 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +  まま(先方のサービス。disable しない)。
 diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png' -x '*.patch' "/tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/docs/\350\207\252\345\213\225\346\255\251\350\241\214_\351\232\234\345\256\263\347\211\251\345\201\234\346\255\242_\346\250\252\347\247\273\345\213\225.md" "g1-proj-main/docs/\350\207\252\345\213\225\346\255\251\350\241\214_\351\232\234\345\256\263\347\211\251\345\201\234\346\255\242_\346\250\252\347\247\273\345\213\225.md"
 --- "/tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/docs/\350\207\252\345\213\225\346\255\251\350\241\214_\351\232\234\345\256\263\347\211\251\345\201\234\346\255\242_\346\250\252\347\247\273\345\213\225.md"	1970-01-01 09:00:00.000000000 +0900
-+++ "g1-proj-main/docs/\350\207\252\345\213\225\346\255\251\350\241\214_\351\232\234\345\256\263\347\211\251\345\201\234\346\255\242_\346\250\252\347\247\273\345\213\225.md"	2026-09-04 13:22:40.713968422 +0900
-@@ -0,0 +1,231 @@
++++ "g1-proj-main/docs/\350\207\252\345\213\225\346\255\251\350\241\214_\351\232\234\345\256\263\347\211\251\345\201\234\346\255\242_\346\250\252\347\247\273\345\213\225.md"	2026-09-04 14:22:17.663899247 +0900
+@@ -0,0 +1,249 @@
 +# 自動歩行 — 前進(壁の手前で自然に停止・障害物は回り込み) / 横歩き(足踏み)(2026-09-04)
 +
 +実装: `real/autowalk.py`(本体)、`real/cockpit.py`(UI と配線)、
@@ -1032,6 +1033,24 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +3. [左へ5cm] / [右へ5cm]、[▼ 後ろへ5cm] を試す。1 歩目は推定 6 cm で指令時間を決めるので、1 歩が 10 cm を超える機体では
 +   最初の 5 cm 指示が行き過ぎることがある。その場合は「強さ 弱」にする。
 +4. 横歩き 0.5 m → 前進(壁の手前で停止)の順(§6 の B〜E)。
++
++
++### 6b-4. 「正面の壁までの距離」の測り方を作り直した(2026-09-04 午後、操作者の指摘)
++
++操作者の報告「LiDAR の距離が正しく出ていない」。調べると、**前後が逆**だった可能性が高い。
++
++| 何が悪かったか | 直したこと |
++|---|---|
++| ブリッジの「前方」= 床が見える向きの平均。部屋の物で起動ごとに 6〜30° 変わり、頭の LiDAR は足が前に張り出すぶん**後ろの床の方が見える**ので後ろを向きやすい | 前方 = **生座標の +X 軸**を床面へ射影(取り付けは固定なので毎回同じ)。切替後の実測: 前 3.20 m(壁の面)・後 0.65 m — 以前「前 0.55〜0.69 m の壁」と出ていたものは後ろの壁/椅子だった |
++| 距離の基準がセンサ +0.10 m(骨盤)で、機体の前面から測る実物より 25 cm ほど大きい | **つま先基準**(`front_offset`=0.15 m。センサ軸→つま先) |
++| コリドー内の最近点なので、手前の物(机の脚・人)を壁と呼んでいた | **壁の面を RANSAC の直線で当てる**(`fit_wall`: 前方 ±1.2 m・h 0.25〜1.6・進行方向に ±35° 以内で垂直な面、内点が最大の 70% 以上ある候補のうち**いちばん手前**)。画面の大きい数字は壁の面までの距離(斜めなら角度も)。手前に物があれば「手前 x m に障害物 — 止まるのはこちら」を別に出す。停止判定は今までどおり手前の最近点 |
++| 床平面の推定が机や段差の天面に乗って 8〜15° 傾いた | 法線が z_raw から 20° 以内・センサ高さ 0.9〜1.6 m の面だけを候補に。60 秒ごとに再推定(内点が 2 割増えれば差し替え)。検出器側は毎コマ床を当て直して傾きを吸収するので、ブリッジの傾き誤差は距離にほぼ効かない(cos) |
++| 前後の向きを現場で確かめる手段が無かった | かんたん画面に **前/後/左/右(±20°)の最近距離**と **[⇄ 前後を反転]**(lidar_mount.json の yaw_offset_deg を ±180。即時反映) |
++| ヨーの小さなずれは手で直せない | **自動較正**: 静止中の景色(5 cm 占有格子)を覚え、0.25 m 以上前進したら景色の流れとオドメトリの移動方向を比べてずれ角を出し、3° 以上なら yaw_offset_deg を直す(20 秒に 1 回、向きが 4° 以上変わった移動は使わない)。机上試験 ±4° |
++
++**現場での確認**: 機体の正面 1 m に立つと「前」が 1.0 前後・「壁」の数字が消えるか小さくなる。
++後ろに立って「後」が反応すれば向きは合っている。逆なら [⇄ 前後を反転]。前進を一度すれば自動較正のログ
++「LiDAR のヨーを自動較正」か「向きは合っています」が出る。
 +
 +## 7. 既知の限界
 +
@@ -1365,8 +1384,8 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
  タブを前面に保つこと**。ブラウザはバックグラウンドのタブでタイマーを
 diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png' -x '*.patch' /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/autowalk.py g1-proj-main/real/autowalk.py
 --- /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/autowalk.py	1970-01-01 09:00:00.000000000 +0900
-+++ g1-proj-main/real/autowalk.py	2026-09-04 13:25:14.829051876 +0900
-@@ -0,0 +1,1330 @@
++++ g1-proj-main/real/autowalk.py	2026-09-04 14:19:08.729202087 +0900
+@@ -0,0 +1,1562 @@
 +#!/usr/bin/env python3
 +"""自動歩行(前進 → 壁の手前で自然に停止 / 障害物は回り込んで元の経路へ / 横歩きは
 +細かい足踏み)と、スマホからの手動操作(押している間だけ動く)のための速度送信。
@@ -1406,6 +1425,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +  経路線 = 開始時の位置と向き。s = 経路に沿った進み、e = 経路からの左へのずれ
 +"""
 +import json
++import os
 +import math
 +import pathlib
 +import threading
@@ -1428,6 +1448,8 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +    side_clear=0.45,   # 横移動中、進行方向にこの距離未満で点があれば止まる[m]
 +    self_fwd=0.40,     # 自分の体(頭のLiDARの真下〜腕)を除く範囲: 前方この距離まで[m]
 +    self_lat=0.50,     # 同・左右この幅まで[m]
++    yaw_fix_deg=0.0,   # センサ座標の点群に足すヨー[deg](lidar_mount.json の値 − ブリッジが適用済みの値)。[前後を反転]で±180
++    front_offset=0.15, # センサ軸→つま先の前方距離[m]。距離は「つま先から」で出す
 +    avoid=True,        # 壁以外の障害物は回り込んで避ける
 +    wall_width=1.4,    # 前方の物体の横幅がこれ以上なら「壁」(回り込まない)[m]
 +    detour_margin=0.15,  # 回り込みで物体の端から取る余裕[m]
@@ -1729,8 +1751,17 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +            z = pts[:, 2]
 +        else:
 +            self.frame = "sensor"
-+            fwd = pts[:, 0] + SENSOR_FWD_OFFSET
-+            lat = pts[:, 1]
++            yf = math.radians(float(self.cfg.get("yaw_fix_deg", 0.0)))
++            if abs(yf) > 1e-6:
++                c, s = math.cos(yf), math.sin(yf)
++                fwd = c * pts[:, 0] - s * pts[:, 1]
++                lat = s * pts[:, 0] + c * pts[:, 1]
++            else:
++                fwd = pts[:, 0].copy()
++                lat = pts[:, 1]
++            # ★距離は「つま先から」(2026-09-04 午後)。以前は骨盤基準(センサ+0.10m)で、壁までの距離が
++            #   実物(機体の前面から測る)より 25cm ほど大きく出ていた
++            fwd = fwd - float(self.cfg.get("front_offset", 0.15))
 +            z = pts[:, 2]
 +        return fwd, lat, z
 +
@@ -1883,8 +1914,76 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +        if out["rear_n"] >= 12:
 +            out["rear_dist"] = round(float(-np.percentile(fwd[mr], 95)), 3)
 +            out["rear_h"] = round(float(np.median(h[mr])), 3)
++        # --- 正面の壁: 前方セクタの点へ水平面内の直線を RANSAC で当てる(2026-09-04 午後)。
++        #     コリドーの最近点は「手前の物」も拾うので、壁そのものの距離は別に出す
++        out["wall_dist"], out["wall_ang"], out["wall_len"] = self.fit_wall(fwd, lat, h, hm)
++        # --- 4 方向の最近距離(前/後/左/右 ±20 度、h 0.2〜1.6、自分の体の外)。前後の向きの確認用
++        rr = np.hypot(fwd + float(cfg.get("front_offset", 0.15)), lat)
++        azd = np.degrees(np.arctan2(lat, fwd + float(cfg.get("front_offset", 0.15))))
++        hm2 = (h > 0.2) & (h < 1.6) & (rr > 0.45)
++        dirs = {}
++        for key, a0 in (("front", 0.0), ("left", 90.0), ("back", 180.0), ("right", -90.0)):
++            da = (azd - a0 + 180.0) % 360.0 - 180.0
++            mm = hm2 & (np.abs(da) < 20.0)
++            dirs[key] = (round(float(np.percentile(rr[mm], 5)), 2) if int(mm.sum()) >= 10 else None)
++        out["dirs"] = dirs
 +        out["ok"] = True
 +        return out
++
++    def fit_wall(self, fwd, lat, h, hm):
++        """前方セクタ(|lat|<1.2m, 0.2<fwd<6m, h 0.25〜1.6)の点に、進行方向にほぼ垂直な直線を当てる。
++        戻り値 (壁までの距離[m] つま先基準・進行線との交点, 壁の法線と進行方向の角度[deg], 壁の見えている幅[m])
++        取れなければ (None, None, None)"""
++        m = hm & (h > 0.25) & (h < 1.6) & (np.abs(lat) < 1.2) & (fwd > 0.2) & (fwd < 6.0)
++        n = int(m.sum())
++        if n < 40:
++            return None, None, None
++        X = np.stack([fwd[m], lat[m]], 1)
++        rng = self._rng
++        cands = []                                     # (内点数, 法線, 通る点, 進行線との交点x)
++        cos35 = math.cos(math.radians(35.0))
++        for _ in range(80):
++            i, j = rng.choice(n, 2, replace=False)
++            d = X[j] - X[i]
++            L = float(np.hypot(d[0], d[1]))
++            if L < 0.15:
++                continue
++            nrm = np.array([-d[1], d[0]]) / L         # 直線の法線
++            if abs(nrm[0]) < cos35:                    # 進行方向にほぼ垂直な面だけ(法線が前方向き)
++                continue
++            r = (X - X[i]) @ nrm
++            cnt = int((np.abs(r) < 0.04).sum())
++            if cnt >= 30:
++                # 進行線(lat=0)との交点の fwd: nrm·(p - X[i]) = 0 で p=(x,0) → x = X[i]·nrm / nrm[0]
++                xh = float((X[i] @ nrm) / nrm[0]) if abs(nrm[0]) > 1e-6 else 1e9
++                cands.append((cnt, nrm, X[i], xh))
++        if not cands:
++            return None, None, None
++        # ★内点が最大の 70% 以上ある候補のうち、いちばん手前の面を採る(壁の奥の面や箱の天面ではなく、
++        #   機体が実際にぶつかる面)。同じ面の候補は交点で寄せる
++        top = max(c[0] for c in cands)
++        good = [c for c in cands if c[0] >= 0.7 * top]
++        best = min(good, key=lambda c: c[3])
++        _cnt, nrm, p0, _xh = best
++        inl = X[np.abs((X - p0) @ nrm) < 0.04]
++        cen = inl.mean(axis=0)
++        u, s, vt = np.linalg.svd(inl - cen, full_matrices=False)
++        d = vt[0]                                       # 直線の向き
++        nrm = np.array([-d[1], d[0]])
++        if nrm[0] < 0:
++            nrm = -nrm
++        ext = float((inl @ d).max() - (inl @ d).min())  # 見えている幅
++        if ext < 0.6:
++            return None, None, None
++        # 進行線(lat=0)との交点: cen + t*d で lat=0 → t = -cen[1]/d[1]
++        if abs(d[1]) < 1e-6:
++            return None, None, None
++        t = -cen[1] / d[1]
++        x_hit = float(cen[0] + t * d[0])
++        ang = math.degrees(math.atan2(nrm[1], nrm[0]))
++        if x_hit < 0.05:
++            return None, None, None
++        return round(x_hit, 3), round(ang, 1), round(ext, 2)
 +
 +
 +# ---------------------------------------------------------------- 速度送信
@@ -1965,6 +2064,58 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +
 +
 +# ---------------------------------------------------------------- 自動歩行
++# ---------------------------------------------------------------- LiDAR ヨーの自動較正
++CAL_CELL = 0.05                    # 占有格子のセル[m]
++CAL_HALF = 4.0                     # 格子の半径[m]
++CAL_SHIFT = 0.6                    # 探す平行移動の範囲[m]
++
++
++def occupancy_grid(fwd, lat, mask):
++    """体座標の点を 5cm 格子の占有(bool)にする。static な景色の比較用"""
++    n = int(round(2 * CAL_HALF / CAL_CELL))
++    G = np.zeros((n, n), dtype=bool)
++    f = fwd[mask]
++    l = lat[mask]
++    i = np.floor((f + CAL_HALF) / CAL_CELL).astype(int)
++    j = np.floor((l + CAL_HALF) / CAL_CELL).astype(int)
++    ok = (i >= 0) & (i < n) & (j >= 0) & (j < n)
++    G[i[ok], j[ok]] = True
++    return G
++
++
++def scene_shift(G0, G1):
++    """G0(前)から G1(今)への景色の平行移動 (dx, dy)[m] を総当たりの相関で求める。
++    戻り値 (dx, dy, 最良スコア, スコアの中央値)。景色は機体が動いた分だけ逆向きに流れる"""
++    n = G0.shape[0]
++    k = int(round(CAL_SHIFT / CAL_CELL))
++    best, bi, bj = -1, 0, 0
++    scores = []
++    for di in range(-k, k + 1):
++        for dj in range(-k, k + 1):
++            a0 = G0[max(0, -di):n - max(0, di), max(0, -dj):n - max(0, dj)]
++            a1 = G1[max(0, di):n - max(0, -di), max(0, dj):n - max(0, -dj)]
++            sc = int(np.count_nonzero(a0 & a1))
++            scores.append(sc)
++            if sc > best:
++                best, bi, bj = sc, di, dj
++    med = float(np.median(scores)) if scores else 0.0
++    return bi * CAL_CELL, bj * CAL_CELL, best, med
++
++
++def yaw_error_from_motion(shift, db):
++    """景色の平行移動 shift(検出器の座標)と、オドメトリの機体座標での移動 db から、
++    検出器の前方軸が機体の前方に対して何度ずれているか[deg]を返す(検出器座標で測った機体前方の角)。
++    yaw_fix はこの値を**引く**と合う。整合しなければ None"""
++    sx, sy = shift
++    dbx, dby = db
++    ns = math.hypot(sx, sy)
++    nd = math.hypot(dbx, dby)
++    if nd < 0.15 or ns < 0.6 * nd or ns > 1.4 * nd:
++        return None
++    e = math.degrees(math.atan2(-sy, -sx) - math.atan2(dby, dbx))
++    return (e + 180.0) % 360.0 - 180.0
++
++
 +class _Abort(Exception):
 +    pass
 +
@@ -2434,6 +2585,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +              "step_v": (0.1, 0.4), "step_on": (0.2, 1.5), "step_off": (0.3, 2.0),
 +              "step_min_on": (0.15, 0.8), "step_est": (0.01, 0.3), "step_max": (1, 60),
 +              "back_dist": (0.02, 0.5), "self_fwd": (0.1, 0.8), "self_lat": (0.2, 0.8),
++              "yaw_fix_deg": (-360.0, 360.0), "front_offset": (-0.3, 0.5),
 +              "tele_vx": (0.05, 0.6), "tele_vy": (0.05, 0.3), "tele_om": (0.1, 0.8)}
 +
 +    def __init__(self, robot, log=print, hb_ok=lambda: True, is_sim=False):
@@ -2445,6 +2597,8 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +        self.lidar = None
 +        self.odom = None
 +        self.det = ObstacleDetector(self.params)
++        self._cal = None             # LiDAR ヨー較正: 静止中の景色の占有格子とそのときのオドメトリ
++        self._cal_last = 0.0
 +        self.sender = VelSender(self._send_vel, log=log)
 +        self.auto = None
 +        self.fsm_id = None
@@ -2509,6 +2663,88 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +            self.enabled = False
 +        return True
 +
++    MOUNT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lidar_mount.json")
++
++    def mount_yaw_file(self):
++        """lidar_mount.json の yaw_offset_deg(無ければ 0)。5 秒キャッシュ"""
++        now = time.time()
++        if now - getattr(self, "_myf_t", 0.0) < 5.0:
++            return getattr(self, "_myf", 0.0)
++        v = 0.0
++        try:
++            with open(self.MOUNT_PATH) as f:
++                v = float(json.load(f).get("yaw_offset_deg", 0.0))
++        except Exception:                          # noqa: BLE001
++            pass
++        self._myf, self._myf_t = v, now
++        return v
++
++    def set_mount_yaw(self, deg):
++        """lidar_mount.json の yaw_offset_deg を書き換える([前後を反転]・自動較正)。即時に反映"""
++        deg = (float(deg) + 180.0) % 360.0 - 180.0
++        d = {}
++        try:
++            with open(self.MOUNT_PATH) as f:
++                d = json.load(f)
++        except Exception:                          # noqa: BLE001
++            d = {}
++        d["yaw_offset_deg"] = round(deg, 1)
++        with open(self.MOUNT_PATH, "w") as f:
++            json.dump(d, f, ensure_ascii=False, indent=1)
++        self._myf_t = 0.0
++        return deg
++
++    def _yaw_calib_step(self, pts, frame, od, t):
++        """前進したときに、景色の流れ(LiDAR)とオドメトリの移動方向を比べて LiDAR のヨーを直す。
++        センサ座標の点群だけ。静止中の点群を覚えておき、0.25m 以上動いたら比べる。
++        向きが 4 度以上変わったら比べない(平行移動だけを見る)。20 秒に 1 回まで"""
++        if od is None or self.det.is_world_frame(frame) or self.det.floor is None:
++            self._cal = None
++            return
++        fwd, lat, z = self.det.to_body(pts, frame, None, None)
++        a, b, c, _n = self.det.floor
++        h = z - (fwd * a + lat * b + c)
++        cfg = self.det.cfg
++        own = (fwd > -0.8) & (fwd < cfg.get("self_fwd", 0.4)) & (np.abs(lat) < cfg.get("self_lat", 0.5))
++        mask = (h > 0.3) & (h < 1.6) & ~own
++        cal = getattr(self, "_cal", None)
++        if cal is None:
++            self._cal = dict(G=occupancy_grid(fwd, lat, mask), x=od[1], y=od[2], yaw=od[3], t=t)
++            return
++        dx, dy = od[1] - cal["x"], od[2] - cal["y"]
++        d = math.hypot(dx, dy)
++        dyaw = abs(_wrap(od[3] - cal["yaw"]))
++        if dyaw > math.radians(4.0):
++            self._cal = None
++            return
++        if d < 0.03:
++            if t - cal["t"] > 2.0:                 # 静止中は新しい景色で覚え直す
++                self._cal = dict(G=occupancy_grid(fwd, lat, mask), x=od[1], y=od[2], yaw=od[3], t=t)
++            return
++        if d < 0.25:
++            return
++        if time.time() - getattr(self, "_cal_last", 0.0) < 20.0:
++            self._cal = None
++            return
++        G1 = occupancy_grid(fwd, lat, mask)
++        sx, sy, best, med = scene_shift(cal["G"], G1)
++        cy, sy0 = math.cos(cal["yaw"]), math.sin(cal["yaw"])
++        db = (cy * dx + sy0 * dy, -sy0 * dx + cy * dy)      # 機体座標での移動(前, 左)
++        e = yaw_error_from_motion((sx, sy), db)
++        self._cal = None
++        self._cal_last = time.time()
++        if e is None or best < max(30, 2.0 * med):
++            self.log(f"LiDAR ヨー較正: 判定できず(移動{d:.2f}m 景色の流れ({sx:+.2f},{sy:+.2f}) 相関{best}/中央{med:.0f})")
++            return
++        if abs(e) < 3.0:
++            self.log(f"LiDAR ヨー較正: 向きは合っています(ずれ {e:+.1f}°、移動{d:.2f}m)")
++            return
++        e = max(-60.0, min(60.0, e)) if abs(e) < 120.0 else e   # 前後逆(±180 近く)はそのまま
++        cur = self.mount_yaw_file()
++        new = self.set_mount_yaw(cur - e)
++        self.log(f"★LiDAR のヨーを自動較正: 検出器の前方が機体の前方から {e:+.1f}° ずれていました → "
++                 f"yaw_offset_deg {cur:.0f}→{new:.0f}(lidar_mount.json、即時反映。移動{d:.2f}m 相関{best})")
++
 +    def _perception(self):
 +        """5Hzで点群を判定。方策の走行中は enable_sensors(False) されて止まる。"""
 +        while not self._closing:
@@ -2524,11 +2760,23 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +                mt = getattr(self.lidar, "mount", None)
 +                if isinstance(mt, dict) and mt.get("height") and str(frame).startswith("livox_level"):
 +                    self.det.floor_prior = -float(mt["height"])
++                    # lidar_mount.json のヨー − ブリッジが適用済みのヨー = 今この場で足す分
++                    #  ([前後を反転] を押した直後から効く。ブリッジは次の起動で json を読む)
++                    yf = float(self.mount_yaw_file()) - float(mt.get("yaw_offset_deg", 0.0))
++                    yf = (yf + 180.0) % 360.0 - 180.0
++                    if abs(yf - float(self.params.get("yaw_fix_deg", 0.0))) > 0.01:
++                        self.params["yaw_fix_deg"] = yf
++                        self.det.cfg = dict(self.params)
 +                odxy = (od[1], od[2]) if od is not None else None
 +                sdir = 1 if self.params.get("side_dir", "left") == "left" else -1
 +                r = self.det.update(pts, frame, odxy, self.robot.yaw(), sdir)
 +                r["age_ms"] = round((time.time() - t) * 1000.0)
 +                r["frame_id"] = frame
++                try:
++                    self._yaw_calib_step(pts, frame, od, t)
++                except Exception as e:             # noqa: BLE001
++                    self._cal = None
++                    self.log(f"(LiDAR ヨー較正の例外: {e})")
 +                with self._obs_lock:
 +                    self._obs = (r, t)
 +            except Exception as e:                 # noqa: BLE001
@@ -2676,6 +2924,9 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +            "frame": obs.get("frame_id", obs.get("frame")),
 +            "floor_ok": obs.get("floor_ok"), "floor_h": obs.get("floor_h"),
 +            "why": obs.get("why", ""),
++            "wall_dist": obs.get("wall_dist"), "wall_ang": obs.get("wall_ang"), "wall_len": obs.get("wall_len"),
++            "dirs": obs.get("dirs"),
++            "yaw_fix_deg": float(self.params.get("yaw_fix_deg", 0.0)),
 +            "lidar_age_ms": (None if t is None else round((now - t) * 1000)),
 +            "lidar_n": (self.lidar.n_recv if self.lidar is not None else 0),
 +            "lidar_src": getattr(self.lidar, "source", "-"),
@@ -2699,7 +2950,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +        }
 diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png' -x '*.patch' /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/cockpit.py g1-proj-main/real/cockpit.py
 --- /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/cockpit.py	2026-09-03 18:26:29.000000000 +0900
-+++ g1-proj-main/real/cockpit.py	2026-09-04 13:57:41.605500015 +0900
++++ g1-proj-main/real/cockpit.py	2026-09-04 14:16:27.430123674 +0900
 @@ -16,6 +16,7 @@
  import gc
  import json
@@ -2718,7 +2969,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
  
  DEPLOY = ROOT / "deploy"
  VEL_HARD = 32.0            # 全関節の速度ハード上限[rad/s]
-@@ -245,7 +249,18 @@
+@@ -245,7 +249,19 @@
      "mode_seated",
      "custom", "run_task",
      "assist", "yawalign", "stopframe", "afterphase",         # ← 2026-08-27に入れ忘れていた
@@ -2730,6 +2981,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +    "legres",                                                # 脚腰の残差スケール。試験用
 +    "walk_go", "sit_check", "sit_go", "hbdrop",              # かんたん画面と途絶の模擬
 +    "cfade",                                                 # 接触後の膝・足首の残差抜き
++    "lidar_flip",                                            # LiDAR の前後を反転。lidar_mount.json に書く
  )
 +CONTACT_FADE_MIN_T = 85           # 接触後フェードの検知を許す最初のコマ。参照の座面到達1.9秒の少し前
 +SEAT_KT_MAX = 18.0                # 完了時: 終端0.5秒の両膝トルク中央値がこれ以上なら「脚に体重が残っている」
@@ -2737,7 +2989,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
  REC_SAVE_EVERY = 100              # 途中で落ちても失わないよう逐次保存
  
  
-@@ -404,6 +419,33 @@
+@@ -404,6 +420,33 @@
          #   前後の釣り合いを担うのは肩ピッチと肘なので、**横方向だけ縮めれば
          #   クロスを直したまま錘を残せる**はず。それが "lat"。
          self.arm_res_mode = "lat"
@@ -2771,7 +3023,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
          # 1回の走行が終わるたびに要点を1行ぶん積む。UIの[走行の統計]タブが
          # ここを読む。npzを開き直さずに現場でその場で比較できるようにするため。
          # 走らせながらnpzを解析すると制御ループを食う(2026-08-26に19Hzまで
-@@ -430,6 +472,16 @@
+@@ -430,6 +473,16 @@
          #   "damp"=ダンプ / "none"=渡さず方策のPDで姿勢維持(従来)
          # 座り終えた姿勢の引き継ぎ先は **着座(FSM3)**。スクワット(FSM2)は
          # 立位でしゃがむモードなので、座った状態から立ち上がろうとしうる。
@@ -2788,7 +3040,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
          self.after_phase = "seated"
          self.obs_b = None
          self.log_dir = None
-@@ -453,6 +505,25 @@
+@@ -453,6 +506,25 @@
          self._estop_pending = None       # estop_now が立てる。ループが後始末
          self._last_beat = None              # UIハートビートの最終受信時刻(未受信=None)
          self._heartbeat_sec = heartbeat_sec # 0で無効
@@ -2814,7 +3066,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
          self._want_arm = False           # ワーカーの準備物をループが取り込む
          self._armed_bundle = None
          self._want_begin = None          # 開始するフェーズ番号
-@@ -474,6 +545,14 @@
+@@ -474,6 +546,14 @@
          self._save_n = 0
          self._save_ms = 0.0
          self._closing = False
@@ -2829,7 +3081,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
          threading.Thread(target=self._saver, daemon=True, name="saver").start()
          self._th = threading.Thread(target=self._loop, daemon=True,
                                      name="fsm50hz")
-@@ -506,7 +585,16 @@
+@@ -506,7 +586,16 @@
  
      def beat(self):
          """UIからのハートビート。HTTPスレッドから直接呼ぶ(キューを経由しない)。"""
@@ -2847,7 +3099,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
  
      def _pop(self):
          with self.lock:
-@@ -540,7 +628,11 @@
+@@ -540,7 +629,11 @@
            通信断の監視が要る(2026-08-26レビュー指摘)。
            標準モード中(STD:*)は内蔵制御が持っているので監視しない。
          """
@@ -2860,7 +3112,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
              return False
          if self.fsm in ("MOVING", "RUNNING", "HOLD", "WAIT_CONFIRM"):
              return True
-@@ -556,18 +648,78 @@
+@@ -556,18 +649,78 @@
          while not self._closing:
              time.sleep(0.01)
              try:
@@ -2946,7 +3198,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
      # ---------------- 緊急停止(★キューに載せない)
      def estop_now(self, why):
          """どのスレッドからでも直接呼ぶ即時停止。**ブロックしない。**
-@@ -588,6 +740,9 @@
+@@ -588,6 +741,9 @@
              self._estop_pending = why
              self.cmd_q = []                        # 溜まった操作は全部捨てる
          self.robot.estop(why)                      # ← ここで実際に止まる
@@ -2956,7 +3208,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
          self.fsm = "DAMP"
          self.armed = False
          self.log(f"★DAMP: {why}")
-@@ -852,6 +1007,209 @@
+@@ -852,6 +1008,209 @@
          self._want_arm = True
          self.log("★UserCtrl取得 → 待たずに方策を開始します(静的保持を挟まない)")
  
@@ -3166,7 +3418,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
      def _do_after_phase(self, name):
          """方策の完了後に標準モードへ渡す(2026-09-03)。
  
-@@ -865,15 +1223,38 @@
+@@ -865,15 +1224,38 @@
          if self.fsm != "HOLD":                     # その間に操作者が介入した
              self.log("完了後の自動移行: 状態が変わったので中止しました")
              return
@@ -3205,7 +3457,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
  
      def _do_start(self):
          pol = self.phases[0][1]
-@@ -1103,6 +1484,10 @@
+@@ -1103,6 +1485,10 @@
          # --- E-STOPの後始末(止めること自体は estop_now が済ませてある)
          if self._estop_pending:
              self._estop_bookkeeping()
@@ -3216,7 +3468,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
          # --- ワーカーが用意した方策/ログ先をここでまとめて差し替える
          if self._want_arm:
              b, self._armed_bundle, self._want_arm = self._armed_bundle, None, False
-@@ -1173,6 +1558,24 @@
+@@ -1173,6 +1559,24 @@
                              + ("(完全に参照どおり)" if self.arm_res <= 0.001 else "")))
              except Exception:                      # noqa: BLE001
                  self.log(f"★腕の残差スケールが不正: {arg}")
@@ -3241,7 +3493,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
          elif cmd == "stopframe":
              try:
                  self.stop_frame = max(0, int(float(arg)))
-@@ -1222,6 +1625,36 @@
+@@ -1222,6 +1626,44 @@
              self._spawn("START", self._do_start)
          elif cmd == "next" and self.fsm == "WAIT_CONFIRM":
              self._begin_phase()
@@ -3259,6 +3511,14 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +            on = (arg == "on")
 +            self.walk.enable_sensors(on)
 +            self.log("LiDAR/オドメトリの読み取り: " + ("開始" if on else "停止"))
++        elif cmd == "lidar_flip":                  # かんたん画面: [前後を反転]
++            try:
++                cur = self.walk.mount_yaw_file()
++                new = self.walk.set_mount_yaw(cur + 180.0)
++                self.log(f"LiDAR の前後を反転しました: yaw_offset_deg {cur:.0f}→{new:.0f}(lidar_mount.json。"
++                         "即時に効きます。壁の数字が実物と合うか見てください)")
++            except Exception as e:                 # noqa: BLE001
++                self.log(f"★LiDAR の反転に失敗: {e}")
 +        elif cmd == "walk_go":                     # かんたん画面: 前進 / 横歩き / 5cm
 +            self._spawn("歩行 開始", lambda a=arg: self._do_walk_go(a))
 +        elif cmd == "sit_check":                   # かんたん画面: 着座前の確認
@@ -3278,7 +3538,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
          elif cmd and cmd.startswith("mode_"):
              # 標準モード(SDK): zero/damp/stand/walk。方策実行は中断
              name = cmd[5:]
-@@ -1287,7 +1720,12 @@
+@@ -1287,7 +1729,12 @@
                               f"★保持中はバランスがありません — "
                               f"支えたまま速やかに [▶ 単体実行] を押すこと")
                      return
@@ -3292,7 +3552,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
                      self.fsm = "WAIT_CONFIRM"
                      if self.is_sim:
                          self.sim_frozen = True
-@@ -1325,7 +1763,11 @@
+@@ -1325,7 +1772,11 @@
              #   周期が遅いときほど小さく出て一度も発火しなかった。
              #   2026-08-26 12:04 の転倒(実測33Hz)で発火しなかったのがこれ。
              recent = self._loop_hist[-LOOP_DT_WINDOW:]
@@ -3305,7 +3565,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
                  med = float(np.median(recent))
                  if med > LOOP_DT_MAX_MS:
                      self.estop_now(
-@@ -1358,7 +1800,8 @@
+@@ -1358,7 +1809,8 @@
              #   ln20系は腕0.2/脚腰0.7が参照npzに同梱されている。
              #   UIの[腕の残差]は、それに**さらに掛ける**補正として働く
              #   (既定1.00なら方策の指定どおり)。
@@ -3315,7 +3575,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
              if self.t == 0:
                  jm = np.abs(target[:15] - q[:15])
                  j = int(jm.argmax())
-@@ -1395,7 +1838,7 @@
+@@ -1395,7 +1847,7 @@
                  return
              self._nan_frames = 0
              self.obs_b.last_cmd = a.copy()
@@ -3324,7 +3584,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
                               pol.kp, pol.kd)
          # simモックは論理時間で進める(壁時計非依存。実機は実時間)
          if self.is_sim and not getattr(self, "sim_frozen", False):
-@@ -1424,15 +1867,17 @@
+@@ -1424,15 +1876,17 @@
          #     コックピットは推論していないので50Hz出てしまう)。
          #     電源は走る前に分かるので、ここで止める。
          pw = self._power_state()
@@ -3344,7 +3604,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
              warn.append(f"CPUの最大コアが{pw['mhz']:.0f}MHzまでしか"
                          f"上がっていない — ガバナ={pw.get('gov', '?')} / "
                          f"power-profiles-daemon を疑う")
-@@ -1442,11 +1887,13 @@
+@@ -1442,11 +1896,13 @@
              ng.append(f"処理中({self.busy_what})")
          if self.fsm in ("RUNNING", "MOVING"):
              ng.append(f"実行中({self.fsm})")
@@ -3359,7 +3619,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
              ng.append(f"制御ループ {lp['hz']:.0f}Hz(45Hz未満) "
                        f"— 電源アダプタとCPUガバナを確認")
          q, dq, quat, gyro, tau = self.robot.state()
-@@ -1570,12 +2017,52 @@
+@@ -1570,12 +2026,52 @@
              return None
  
      def _scale_arm(self, a):
@@ -3416,7 +3676,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
          return out
  
      def _pose_rows(self, q):
-@@ -1688,6 +2175,17 @@
+@@ -1688,6 +2184,17 @@
          self._early_track_j = ""
          self._dt_hist = []
          self._dt_ms = 0.0
@@ -3434,7 +3694,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
          self._start_pose_err = emax
          self._start_pose_worst = worst
          # ★参照ブレンドの起点。いまの姿勢から参照へ滑り込ませる
-@@ -1781,6 +2279,9 @@
+@@ -1781,6 +2288,9 @@
              "after_phase": self.after_phase,
              "arm_res": float(self.arm_res),
              "arm_res_mode": self.arm_res_mode,
@@ -3444,7 +3704,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
          }
          try:
              (self.log_dir / f"run{self.run_i:03d}_設定.json").write_text(
-@@ -1864,6 +2365,32 @@
+@@ -1864,6 +2374,32 @@
              dt = np.array([r[idt] for r in rows[1:]])
              name, pol = self.phases[self.phase_i]
              crouch = float(np.degrees(((q0[3] + q0[9]) - (q0[4] + q0[10])) / 2))
@@ -3477,7 +3737,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
              self.run_stats.append({
                  "t": time.strftime("%H:%M:%S"),
                  "run": f"run{self.run_i:03d}", "pol": name, "how": how,
-@@ -1884,6 +2411,10 @@
+@@ -1884,6 +2420,10 @@
                  "asat": round(100.0 * float(np.mean(np.abs(act[:, 15:]) > 0.98)), 1),
                  "dt_med": round(float(np.median(dt)), 1),
                  "dt_max": round(float(dt.max()), 1),
@@ -3488,7 +3748,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
              })
              del self.run_stats[:-200]
          except Exception as e:                     # noqa: BLE001
-@@ -1932,6 +2463,8 @@
+@@ -1932,6 +2472,8 @@
          #   保持は「実際に走り終わったコマ」で行うこと。
          self.hold_pol = pol
          self.hold_t = max(0, min(self.t, pol.n) - 1)
@@ -3497,7 +3757,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
          if self.phase_i + 1 < len(self.phases):
              self.phase_i += 1
              if self.step_mode:
-@@ -1943,9 +2476,16 @@
+@@ -1943,9 +2485,16 @@
          else:
              self.fsm = "HOLD"
              self.log(f"{name} 完了。全フェーズ終了 — 方策で姿勢維持中")
@@ -3515,7 +3775,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
                  nm = {"seated": "着座(FSM3)", "sit": "スクワット(FSM2)",
                        "damp": "ダンプ"}[self.after_phase]
                  self.log(f"完了後の自動移行: {nm} へ渡します")
-@@ -2025,6 +2565,10 @@
+@@ -2025,6 +2574,10 @@
                  "after_phase": self.after_phase,
                  "arm_res": float(self.arm_res),
                  "arm_res_mode": self.arm_res_mode,
@@ -3526,7 +3786,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
                  "pol_scale": self._pol_scale(),
                  "run_stats": self.run_stats[-40:],
                  "ramp": float(self.action_ramp_s),
-@@ -2060,6 +2604,16 @@
+@@ -2060,6 +2613,16 @@
                  "go": self._go_check(),
                  "ground": getattr(self, "_ground", None),
                  "fsm_id": getattr(self, "_fsm_id", None),
@@ -3543,7 +3803,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
                  "user_ctrl": bool(getattr(self.robot, "_use_user_topic", False)),
                  "logs": list(self.logs[-25:]),
                  **extra,
-@@ -2068,7 +2622,12 @@
+@@ -2068,7 +2631,12 @@
  
  PAGE = """<!doctype html><html lang="ja"><head><meta charset="utf-8">
  <title>G1 Cockpit</title>
@@ -3557,7 +3817,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
  <style>
  :root{--bg:#111;--card:#1c1c1c;--card2:#242424;--line:#333;--t1:#eee;--t2:#9a9a9a;
   --ok:#1baf7a;--warn:#eda100;--bad:#e34948;--acc:#3987e5}
-@@ -2116,6 +2675,33 @@
+@@ -2116,6 +2684,33 @@
  table.st th:first-child,table.st td:first-child{text-align:left}
  table.st td{text-align:right;padding:3px 6px;border-top:1px solid var(--line);white-space:nowrap}
  .scroll{max-height:430px;overflow:auto;border:1px solid var(--line);border-radius:8px}
@@ -3591,7 +3851,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
  </style></head><body>
  
  <h1>&#129302; G1 Cockpit <span id="mode" class="lbl"></span></h1>
-@@ -2136,7 +2722,7 @@
+@@ -2136,7 +2731,7 @@
   </div>
   <div>
    <button id="estop" onclick="cmd('estop')">&#9632; E-STOP</button>
@@ -3600,7 +3860,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
    <div class="card" style="margin-top:10px;padding:9px 11px">
     <div class="lbl" id="pwr">-</div>
    </div>
-@@ -2272,6 +2858,38 @@
+@@ -2272,6 +2867,38 @@
    dp4: 146〜242コマが「背もたれへ18度反る」区間(2026-08-27解析)</div>
   </div>
  
@@ -3639,7 +3899,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
   <details><summary>詳細設定 (参照ブレンド / ランプ / ヨー合わせ / 進行)</summary>
    <div class="row">参照ブレンド
     <select id="sel_blend" onchange="cmd('blend',this.value)">
-@@ -2287,6 +2905,25 @@
+@@ -2287,6 +2914,25 @@
      <option value="0.5">0.5秒 — シムでrcの傾きが最小</option>
      <option value="0.8">0.8秒 — ★シムでrcが転倒。使わない</option>
     </select></div>
@@ -3665,7 +3925,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
    <div class="row">ヨー合わせ
     <select id="sel_yaw" onchange="cmd('yawalign',this.value)">
      <option value="on">ON(既定)</option>
-@@ -2296,6 +2933,8 @@
+@@ -2296,6 +2942,8 @@
     <select id="sel_mode" onchange="cmd('mode',this.value)">
      <option value="step">ステップ(各フェーズ前に確認)</option>
      <option value="auto">自動</option></select></div>
@@ -3674,7 +3934,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
   </details>
  
   <details><summary>登り / 旋回 / 通しシーケンス</summary>
-@@ -2356,9 +2995,15 @@
+@@ -2356,9 +3004,15 @@
  </div>
  </div>
  
@@ -3691,7 +3951,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
  function sel(k){cmd('select',k+':'+document.getElementById('sel_'+k).value)}
  function tab(id){
   document.querySelectorAll('.pane').forEach(e=>e.classList.remove('on'));
-@@ -2431,7 +3076,8 @@
+@@ -2431,7 +3085,8 @@
  // 走行1本ごとの統計。npzを開かずコックピットが走行中に計算した値。
  const SCOL=[['t','時刻'],['run','run'],['how','結果'],['n','コマ'],['crouch','しゃがみ'],
   ['assist','補助'],['route','経路'],['rate0','開始揺れ'],['tmax','最大傾'],['tend','終端傾'],
@@ -3701,7 +3961,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
  const AL={'?':'未記入','none':'なし','light':'軽く','hold':'支えた'};
  function drawStats(rs){
   const e=document.getElementById('stats'); if(!e)return;
-@@ -2450,6 +3096,10 @@
+@@ -2450,6 +3105,10 @@
     if(c[0]==='ahip')st='color:'+(Math.abs(v)>0.4?'var(--bad)':'var(--ok)');
     if(c[0]==='kdiff')st='color:'+(v>0.4?'var(--warn)':'var(--t1)');
     if(c[0]==='dt_med')st='color:'+(v>25?'var(--bad)':'var(--t1)');
@@ -3712,7 +3972,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
     return '<td style="'+st+'">'+(v==null?'-':v)+'</td>';
    }).join('')+'</tr>';
   }
-@@ -2458,7 +3108,9 @@
+@@ -2458,7 +3117,9 @@
   document.getElementById('statsum').innerHTML=
    'この起動から '+n+'本 / 座れた(終端傾き15〜24&deg;) <b style="color:var(--ok)">'+ok+'本</b>'+
    '　参照は終端18.0&deg; / シム 最大22.1&deg;・終端18.5&deg;'+
@@ -3723,7 +3983,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
  }
  function fill(id,arr,cur,skip,notes){const e=document.getElementById(id);
   if(!e||e.dataset.done)return; e.dataset.done=1;
-@@ -2495,6 +3147,8 @@
+@@ -2495,6 +3156,8 @@
   document.getElementById('sel_stop').value=String(d.stop_frame||0);
   document.getElementById('sel_after').value=d.after_phase||'none';
   document.getElementById('sel_armres').value=(d.arm_res===undefined?1:d.arm_res).toFixed(1);
@@ -3732,7 +3992,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
   document.getElementById('sel_armmode').value=d.arm_res_mode||'lat';
   const ps=document.getElementById('polscale');
   if(ps){const p=d.pol_scale;
-@@ -2558,14 +3212,336 @@
+@@ -2558,14 +3221,346 @@
   document.getElementById('log').textContent=d.logs.join('\\n');
   document.getElementById('next').disabled=(d.fsm!=='WAIT_CONFIRM');
   document.getElementById('place').style.display=d.is_sim?'inline-block':'none';
@@ -3934,9 +4194,12 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +  <button onclick="nudge('right')">右へ5cm &#9654;</button>
 + </div>
 + <div id="walldist" style="margin-top:8px;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:#161616">
-+  <div class="st" style="margin:0">前の壁（障害物）までの距離 — LiDAR は自動で読んでいます</div>
++  <div class="st" style="margin:0">正面の壁までの距離（つま先から、壁の面を当てて測る） — LiDAR は自動で読んでいます</div>
 +  <div style="font-size:34px;font-weight:800;line-height:1.2" id="walldist_v">-</div>
++  <div class="st" id="walldist_o" style="margin:0;color:var(--warn)"></div>
 +  <div class="st" id="walldist_s" style="margin:0">-</div>
++  <div class="st" id="walldist_d" style="margin:4px 0 0">前 - / 後 - / 左 - / 右 -</div>
++  <div class="row" style="margin-top:6px"><button onclick="if(confirm('LiDAR の前後を反転します。正面の壁の数字が「後ろ」の距離と入れ替わります。よいですか？'))cmd('lidar_flip')" style="min-height:40px">⇄ 前後を反転（数字が後ろの壁と合っているとき）</button></div>
 + </div>
 + <div id="walkst" class="st">-</div>
 +</section>
@@ -3989,8 +4252,15 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 + const p=w.params||{}, sd=p.stop_dist||0.6;
 + const lidarOK=(w.lidar_age_ms!=null&&w.lidar_age_ms<1500);
 + if(!lidarOK){ v.textContent='LiDAR 未受信'; v.style.color='var(--bad)'; s.textContent='点群が来ていません。機体の lidar_bridge を確認'; return; }
-+ if(w.dist==null){ v.textContent='3m 以内に なし'; v.style.color='var(--ok)'; }
-+ else { v.textContent=w.dist.toFixed(2)+' m'+(w.wall?'（壁）':(w.width!=null?'（幅 '+w.width+' m の障害物）':'')); v.style.color=(w.dist<=sd)?'var(--bad)':(w.dist<=sd+0.5?'var(--warn)':'var(--ok)'); }
++ const o=document.getElementById('walldist_o'), dd=document.getElementById('walldist_d');
++ const wd=w.wall_dist, od=w.dist;
++ if(wd!=null){ v.textContent=wd.toFixed(2)+' m（壁'+(w.wall_ang!=null&&Math.abs(w.wall_ang)>=8?'、'+Math.abs(w.wall_ang)+'° 斜め':'')+'）';
++   const near=(od!=null&&od<wd-0.15);
++   const ref=near?od:wd; v.style.color=(ref<=sd)?'var(--bad)':(ref<=sd+0.5?'var(--warn)':'var(--ok)');
++   if(o) o.textContent=near?('手前 '+od.toFixed(2)+' m に障害物'+(w.width!=null?'（幅 '+w.width+' m）':'')+' — 止まるのはこちら'):''; }
++ else if(od==null){ v.textContent='3m 以内に なし'; v.style.color='var(--ok)'; if(o)o.textContent=''; }
++ else { v.textContent=od.toFixed(2)+' m'+(w.wall?'（壁）':(w.width!=null?'（幅 '+w.width+' m の障害物）':'')); v.style.color=(od<=sd)?'var(--bad)':(od<=sd+0.5?'var(--warn)':'var(--ok)'); if(o)o.textContent='壁の面は取れていません（手前の物までの距離）'; }
++ if(dd&&w.dirs){ const f=x=>(x==null?'-':x.toFixed(2)); dd.textContent='前 '+f(w.dirs.front)+' / 後 '+f(w.dirs.back)+' / 左 '+f(w.dirs.left)+' / 右 '+f(w.dirs.right)+' m（±20°の最近点、つま先から）'+(w.yaw_fix_deg?'　ヨー補正 '+w.yaw_fix_deg+'°':''); }
 + s.textContent='停止距離 '+sd.toFixed(2)+' m　LiDAR '+w.lidar_age_ms+'ms 点'+(w.n_obs||0)+' 床 '+(w.floor_h==null?'-':w.floor_h+'m')
 +  +(w.mount?'　取付: 高さ'+w.mount.height+'m 傾き'+w.mount.tilt_deg+'°':'')+(w.free_l!=null||w.free_r!=null?'　回り込み可 '+(w.free_l!=null?'左':'')+(w.free_r!=null?'右':''):'');
 +}
@@ -4070,7 +4340,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
  
  class Handler(BaseHTTPRequestHandler):
      engine = None
-@@ -2603,8 +3579,17 @@
+@@ -2603,8 +3598,17 @@
              self._send(json.dumps(d).encode(), "application/json")
          elif p == "/frame.jpg" and self.engine.is_sim:
              self._send(self.engine.robot.render_jpeg(), "image/jpeg")
@@ -4089,7 +4359,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
  
      def do_POST(self):
          q = parse_qs(urlparse(self.path).query)
-@@ -2618,6 +3603,13 @@
+@@ -2618,6 +3622,13 @@
              self.engine.estop_now(why)
          elif c == "beat":
              self.engine.beat()
@@ -4103,7 +4373,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
          elif c == "select" and a and ":" in a:
              k, v = a.split(":", 1)
              self.engine.command("select", (k, v))
-@@ -2695,6 +3687,7 @@
+@@ -2695,6 +3706,7 @@
          #   出ないままプロセスが終わり得た。close() は damp を実際に
          #   送り切ってから送信スレッドを止める
          eng.estop_now("サーバ終了")
@@ -4159,8 +4429,8 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +echo "  無線: http://192.168.179.100:8090   有線: http://192.168.123.164:8090"
 diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png' -x '*.patch' /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/lidar_bridge.py g1-proj-main/real/lidar_bridge.py
 --- /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/lidar_bridge.py	1970-01-01 09:00:00.000000000 +0900
-+++ g1-proj-main/real/lidar_bridge.py	2026-09-04 12:23:22.705503049 +0900
-@@ -0,0 +1,313 @@
++++ g1-proj-main/real/lidar_bridge.py	2026-09-04 14:16:02.557140697 +0900
+@@ -0,0 +1,347 @@
 +#!/usr/bin/env python3
 +"""Livox Mid-360 → 点群を /dev/shm へ 10Hz で書く(機体上で動かす。コックピットが読む)。
 +
@@ -4256,16 +4526,25 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +        except Exception:                          # noqa: BLE001
 +            pass
 +
-+    def estimate(self, P):
-+        """P (N,3) 生座標。RANSACで最大平面(=床)を探し、原点が上側になる法線を取る。
-+        床の点の方位の平均を前方にする。成功したら True"""
++    def estimate(self, P, prior_h=None):
++        """P (N,3) 生座標。床平面を RANSAC で探して水平化の回転を作る。成功したら True。
++        ★2026-09-04 午後の見直し:
++          - 床の候補は「法線がセンサの z 軸から 30 度以内」かつ「センサからの高さ 0.9〜1.6m」に限る
++            (机の天板やスロープを床と誤認して 8 度傾いた実測があった)
++          - 前方 = 生座標の +X 軸を床面へ射影したもの(取り付けは固定なので毎回同じになる)。
++            以前の「床が見える向きの平均」は部屋の物で 30 度近く変わった(実測)。
++            前後が逆なら lidar_mount.json の yaw_offset_deg=180(かんたん画面の[前後を反転]が書く)"""
 +        r = np.linalg.norm(P, axis=1)
 +        Q = P[(r > 0.4) & (r < 5.0)]
 +        if len(Q) < 800:
 +            return False
 +        rng = np.random.default_rng(0)
 +        best_n, best_c, best_cnt = None, 0.0, 0
-+        idx = rng.integers(0, len(Q), size=(400, 3))
++        idx = rng.integers(0, len(Q), size=(600, 3))
++        zax = np.array([0.0, 0.0, 1.0])
++        # ★取り付けは剛体で上下逆(床の法線 ≈ −z_raw)。ただし機体の前傾(802 の立ち方で 5〜9 度)が
++        #   そのまま乗るので、法線が z_raw から 20 度以内の面を床の候補にする(机・スロープは弾く)
++        cos30 = math.cos(math.radians(20.0))
 +        for a, b, c in idx:
 +            p0, p1, p2 = Q[a], Q[b], Q[c]
 +            n = np.cross(p1 - p0, p2 - p0)
@@ -4273,44 +4552,59 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +            if nn < 1e-6:
 +                continue
 +            n /= nn
++            if abs(float(n @ zax)) < cos30:       # センサの z 軸から 30 度以上ずれた面は床ではない
++                continue
 +            cc = -float(n @ p0)
-+            if n @ np.zeros(3) + cc < 0:          # 原点が正側(=法線がセンサへ向く=上)になるように
++            if cc < 0:                            # 原点(センサ)が正側 = 法線がセンサへ向く = 上
 +                n, cc = -n, -cc
++            if not (0.9 < cc < 1.6):              # センサの高さとして妥当な範囲
++                continue
++            if prior_h is not None and abs(cc - prior_h) > 0.25:
++                continue
 +            dist = np.abs(Q @ n + cc)
 +            cnt = int((dist < 0.03).sum())
 +            if cnt > best_cnt:
 +                best_n, best_c, best_cnt = n, cc, cnt
-+        if best_n is None or best_cnt < 0.10 * len(Q):
-+            return False
-+        # 精密化(内点でLSQ)
++        if best_n is None or best_cnt < 0.08 * len(Q):
++            # 床が取れない: 水平取り付け(法線 = −z_raw)として高さは事前値か 1.27m を使う(安全側の既定)
++            n = np.array([0.0, 0.0, -1.0])
++            h = float(prior_h if prior_h else 1.27)
++            fwd = np.array([1.0, 0.0, 0.0])
++            if abs(self.yaw_offset) > 1e-6:
++                c, s_ = math.cos(self.yaw_offset), math.sin(self.yaw_offset)
++                fwd = c * fwd + s_ * np.cross(n, fwd)
++            left = np.cross(n, fwd)
++            self.R = np.stack([fwd, left, n])
++            self.info = dict(height=round(h, 3), tilt_deg=0.0, fwd_raw=[round(float(v), 3) for v in fwd],
++                             up_raw=[0.0, 0.0, -1.0], n_floor=0,
++                             yaw_offset_deg=round(math.degrees(self.yaw_offset), 1), axis="+X_raw(床なし)")
++            return True
 +        inl = Q[np.abs(Q @ best_n + best_c) < 0.03]
 +        cen = inl.mean(axis=0)
 +        u, s, vt = np.linalg.svd(inl - cen, full_matrices=False)
 +        n = vt[2]
 +        if n @ (-cen) < 0:                        # 原点(センサ)が平面より上
 +            n = -n
-+        h = float(abs(n @ cen))                   # センサの床からの高さ
-+        if not (0.4 < h < 2.0):
++        h = float(abs(n @ cen))
++        if not (0.9 < h < 1.6):
 +            return False
-+        # 前方 = 床の点の水平方向の平均
-+        horiz = inl - np.outer(inl @ n, n)
-+        fwd = horiz.mean(axis=0)
-+        fwd -= n * (fwd @ n)
++        # 前方 = 生座標 +X を床面へ射影(固定)。ヨーの上書きは lidar_mount.json
++        fwd = np.array([1.0, 0.0, 0.0]) - n * float(n @ np.array([1.0, 0.0, 0.0]))
 +        if np.linalg.norm(fwd) < 0.05:
 +            return False
 +        fwd /= np.linalg.norm(fwd)
-+        # ヨーの上書き(lidar_mount.json)
 +        if abs(self.yaw_offset) > 1e-6:
 +            c, s_ = math.cos(self.yaw_offset), math.sin(self.yaw_offset)
 +            left = np.cross(n, fwd)
 +            fwd = c * fwd + s_ * left
 +        left = np.cross(n, fwd)
-+        self.R = np.stack([fwd, left, n])         # 行 = 新しい軸(旧座標で表現)
++        self.R = np.stack([fwd, left, n])
 +        tilt = math.degrees(math.acos(min(1.0, abs(float(n[2])))))
 +        self.info = dict(height=round(h, 3), tilt_deg=round(tilt, 1),
 +                         fwd_raw=[round(float(v), 3) for v in fwd],
 +                         up_raw=[round(float(v), 3) for v in n],
-+                         n_floor=int(len(inl)), yaw_offset_deg=round(math.degrees(self.yaw_offset), 1))
++                         n_floor=int(len(inl)), yaw_offset_deg=round(math.degrees(self.yaw_offset), 1),
++                         axis="+X_raw")
 +        return True
 +
 +    def apply(self, P):
@@ -4427,6 +4721,16 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +                            if self.verbose:
 +                                print(f"取り付け推定: {self.mount.info}", flush=True)
 +                        acc = acc[-3:]
++                if self.mount_ok and now - getattr(self, "_t_reest", t0) > 60.0:
++                    # 60 秒ごとに再推定し、床の内点が 2 割以上増えるなら差し替える(最初の推定が
++                    # 机や人で汚れていた場合の保険)。高さは前回の値の ±25cm に限る
++                    self._t_reest = now
++                    m2 = Mount()
++                    if (m2.estimate(P[:, :3], prior_h=self.mount.info.get("height"))
++                            and m2.info["n_floor"] > 1.2 * self.mount.info.get("n_floor", 0)):
++                        self.mount = m2
++                        if self.verbose:
++                            print(f"取り付け再推定: {self.mount.info}", flush=True)
 +                if self.mount_ok:
 +                    P = np.concatenate([self.mount.apply(P[:, :3]), P[:, 3:4]], 1).astype(np.float32)
 +                    frame_id = "livox_level"
@@ -5399,8 +5703,8 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +WantedBy=multi-user.target
 diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png' -x '*.patch' /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/test_autowalk.py g1-proj-main/real/test_autowalk.py
 --- /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/test_autowalk.py	1970-01-01 09:00:00.000000000 +0900
-+++ g1-proj-main/real/test_autowalk.py	2026-09-04 13:23:50.448838955 +0900
-@@ -0,0 +1,289 @@
++++ g1-proj-main/real/test_autowalk.py	2026-09-04 14:16:44.220754168 +0900
+@@ -0,0 +1,315 @@
 +#!/usr/bin/env python3
 +"""autowalk の机上試験(実機不要・1〜2分)。
 +
@@ -5503,8 +5807,34 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +    check(r4["ok"] and r4["frame"] == "sensor", f"センサ座標の点群を扱える {r4['why']}")
 +    check(r4["floor_ok"] and abs(r4["floor_h"] - 1.15) < 0.08,
 +          f"センサ座標: 床までの高さ {r4['floor_h']} (期待1.15±0.08)")
-+    check(r4["dist"] is not None and abs(r4["dist"] - 1.20) < 0.10,
-+          f"センサ座標(傾き10度): 前方距離 {r4['dist']} (期待1.20±0.10)")
++    check(r4["dist"] is not None and abs(r4["dist"] - 0.95) < 0.10,
++          f"センサ座標(傾き10度): 前方距離 {r4['dist']} (期待0.95±0.10 = 1.20 − つま先0.15 − センサ0.10)")
++    # 壁(幅4m)をセンサ座標で: 壁の面フィット・4方向・ヨー補正(2026-09-04 午後)
++    bodyw = make_world_cloud(rng, (0.0, 0.0), 1.50, 0.0, box_w=4.0)
++    Pw = bodyw.astype(np.float64)
++    Pw[:, 0] -= SENSOR_FWD_OFFSET
++    Pw[:, 2] -= 1.15
++    xs = cx * Pw[:, 0] - sx * Pw[:, 2]
++    zs = sx * Pw[:, 0] + cx * Pw[:, 2]
++    sensw = np.stack([xs, Pw[:, 1], zs], 1).astype(np.float32)
++    det3 = ObstacleDetector(WALK_DEFAULTS)
++    r5 = det3.update(sensw, "livox_level", None, None, side_dir=1)
++    exp = 1.50 - SENSOR_FWD_OFFSET - WALK_DEFAULTS["front_offset"]
++    check(r5["wall_dist"] is not None and abs(r5["wall_dist"] - exp) < 0.10,
++          f"壁の面フィット: {r5['wall_dist']} (期待{exp:.2f}±0.10) 角度{r5['wall_ang']} 幅{r5['wall_len']}")
++    d = r5.get("dirs") or {}
++    check(d.get("front") is not None and abs(d["front"] - (1.50 - SENSOR_FWD_OFFSET)) < 0.15,
++          f"4方向: 前 {d.get('front')} (期待{1.50 - SENSOR_FWD_OFFSET:.2f}±0.15) 後 {d.get('back')} 左 {d.get('left')} 右 {d.get('right')}")
++    # センサがヨー +30 度回って付いている → yaw_fix_deg=-30 で同じ距離になる
++    th2 = math.radians(30.0)
++    c2, s2 = math.cos(th2), math.sin(th2)
++    rot = np.stack([c2 * sensw[:, 0] - s2 * sensw[:, 1], s2 * sensw[:, 0] + c2 * sensw[:, 1], sensw[:, 2]], 1).astype(np.float32)
++    cfg = dict(WALK_DEFAULTS)
++    cfg["yaw_fix_deg"] = -30.0
++    det4 = ObstacleDetector(cfg)
++    r6 = det4.update(rot, "livox_level", None, None, side_dir=1)
++    check(r6["wall_dist"] is not None and abs(r6["wall_dist"] - exp) < 0.10 and abs(r6["wall_ang"] or 0) < 6,
++          f"ヨー補正 -30度: 壁 {r6['wall_dist']} (期待{exp:.2f}±0.10) 壁の角度 {r6['wall_ang']} (期待≈0)")
 +
 +
 +def test_deadman():

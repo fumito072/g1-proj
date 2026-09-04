@@ -257,6 +257,7 @@ CMD_ALLOW = (
     "legres",                                                # 脚腰の残差スケール。試験用
     "walk_go", "sit_check", "sit_go", "hbdrop",              # かんたん画面と途絶の模擬
     "cfade",                                                 # 接触後の膝・足首の残差抜き
+    "lidar_flip",                                            # LiDAR の前後を反転。lidar_mount.json に書く
 )
 CONTACT_FADE_MIN_T = 85           # 接触後フェードの検知を許す最初のコマ。参照の座面到達1.9秒の少し前
 SEAT_KT_MAX = 18.0                # 完了時: 終端0.5秒の両膝トルク中央値がこれ以上なら「脚に体重が残っている」
@@ -1639,6 +1640,14 @@ class Engine:
             on = (arg == "on")
             self.walk.enable_sensors(on)
             self.log("LiDAR/オドメトリの読み取り: " + ("開始" if on else "停止"))
+        elif cmd == "lidar_flip":                  # かんたん画面: [前後を反転]
+            try:
+                cur = self.walk.mount_yaw_file()
+                new = self.walk.set_mount_yaw(cur + 180.0)
+                self.log(f"LiDAR の前後を反転しました: yaw_offset_deg {cur:.0f}→{new:.0f}(lidar_mount.json。"
+                         "即時に効きます。壁の数字が実物と合うか見てください)")
+            except Exception as e:                 # noqa: BLE001
+                self.log(f"★LiDAR の反転に失敗: {e}")
         elif cmd == "walk_go":                     # かんたん画面: 前進 / 横歩き / 5cm
             self._spawn("歩行 開始", lambda a=arg: self._do_walk_go(a))
         elif cmd == "sit_check":                   # かんたん画面: 着座前の確認
@@ -3409,9 +3418,12 @@ input[type=number]{width:84px}
   <button onclick="nudge('right')">右へ5cm &#9654;</button>
  </div>
  <div id="walldist" style="margin-top:8px;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:#161616">
-  <div class="st" style="margin:0">前の壁（障害物）までの距離 — LiDAR は自動で読んでいます</div>
+  <div class="st" style="margin:0">正面の壁までの距離（つま先から、壁の面を当てて測る） — LiDAR は自動で読んでいます</div>
   <div style="font-size:34px;font-weight:800;line-height:1.2" id="walldist_v">-</div>
+  <div class="st" id="walldist_o" style="margin:0;color:var(--warn)"></div>
   <div class="st" id="walldist_s" style="margin:0">-</div>
+  <div class="st" id="walldist_d" style="margin:4px 0 0">前 - / 後 - / 左 - / 右 -</div>
+  <div class="row" style="margin-top:6px"><button onclick="if(confirm('LiDAR の前後を反転します。正面の壁の数字が「後ろ」の距離と入れ替わります。よいですか？'))cmd('lidar_flip')" style="min-height:40px">⇄ 前後を反転（数字が後ろの壁と合っているとき）</button></div>
  </div>
  <div id="walkst" class="st">-</div>
 </section>
@@ -3464,8 +3476,15 @@ function drawWall(w){
  const p=w.params||{}, sd=p.stop_dist||0.6;
  const lidarOK=(w.lidar_age_ms!=null&&w.lidar_age_ms<1500);
  if(!lidarOK){ v.textContent='LiDAR 未受信'; v.style.color='var(--bad)'; s.textContent='点群が来ていません。機体の lidar_bridge を確認'; return; }
- if(w.dist==null){ v.textContent='3m 以内に なし'; v.style.color='var(--ok)'; }
- else { v.textContent=w.dist.toFixed(2)+' m'+(w.wall?'（壁）':(w.width!=null?'（幅 '+w.width+' m の障害物）':'')); v.style.color=(w.dist<=sd)?'var(--bad)':(w.dist<=sd+0.5?'var(--warn)':'var(--ok)'); }
+ const o=document.getElementById('walldist_o'), dd=document.getElementById('walldist_d');
+ const wd=w.wall_dist, od=w.dist;
+ if(wd!=null){ v.textContent=wd.toFixed(2)+' m（壁'+(w.wall_ang!=null&&Math.abs(w.wall_ang)>=8?'、'+Math.abs(w.wall_ang)+'° 斜め':'')+'）';
+   const near=(od!=null&&od<wd-0.15);
+   const ref=near?od:wd; v.style.color=(ref<=sd)?'var(--bad)':(ref<=sd+0.5?'var(--warn)':'var(--ok)');
+   if(o) o.textContent=near?('手前 '+od.toFixed(2)+' m に障害物'+(w.width!=null?'（幅 '+w.width+' m）':'')+' — 止まるのはこちら'):''; }
+ else if(od==null){ v.textContent='3m 以内に なし'; v.style.color='var(--ok)'; if(o)o.textContent=''; }
+ else { v.textContent=od.toFixed(2)+' m'+(w.wall?'（壁）':(w.width!=null?'（幅 '+w.width+' m の障害物）':'')); v.style.color=(od<=sd)?'var(--bad)':(od<=sd+0.5?'var(--warn)':'var(--ok)'); if(o)o.textContent='壁の面は取れていません（手前の物までの距離）'; }
+ if(dd&&w.dirs){ const f=x=>(x==null?'-':x.toFixed(2)); dd.textContent='前 '+f(w.dirs.front)+' / 後 '+f(w.dirs.back)+' / 左 '+f(w.dirs.left)+' / 右 '+f(w.dirs.right)+' m（±20°の最近点、つま先から）'+(w.yaw_fix_deg?'　ヨー補正 '+w.yaw_fix_deg+'°':''); }
  s.textContent='停止距離 '+sd.toFixed(2)+' m　LiDAR '+w.lidar_age_ms+'ms 点'+(w.n_obs||0)+' 床 '+(w.floor_h==null?'-':w.floor_h+'m')
   +(w.mount?'　取付: 高さ'+w.mount.height+'m 傾き'+w.mount.tilt_deg+'°':'')+(w.free_l!=null||w.free_r!=null?'　回り込み可 '+(w.free_l!=null?'左':'')+(w.free_r!=null?'右':''):'');
 }

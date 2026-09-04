@@ -37,6 +37,7 @@
   経路線 = 開始時の位置と向き。s = 経路に沿った進み、e = 経路からの左へのずれ
 """
 import json
+import os
 import math
 import pathlib
 import threading
@@ -59,6 +60,8 @@ WALK_DEFAULTS = dict(
     side_clear=0.45,   # 横移動中、進行方向にこの距離未満で点があれば止まる[m]
     self_fwd=0.40,     # 自分の体(頭のLiDARの真下〜腕)を除く範囲: 前方この距離まで[m]
     self_lat=0.50,     # 同・左右この幅まで[m]
+    yaw_fix_deg=0.0,   # センサ座標の点群に足すヨー[deg](lidar_mount.json の値 − ブリッジが適用済みの値)。[前後を反転]で±180
+    front_offset=0.15, # センサ軸→つま先の前方距離[m]。距離は「つま先から」で出す
     avoid=True,        # 壁以外の障害物は回り込んで避ける
     wall_width=1.4,    # 前方の物体の横幅がこれ以上なら「壁」(回り込まない)[m]
     detour_margin=0.15,  # 回り込みで物体の端から取る余裕[m]
@@ -360,8 +363,17 @@ class ObstacleDetector:
             z = pts[:, 2]
         else:
             self.frame = "sensor"
-            fwd = pts[:, 0] + SENSOR_FWD_OFFSET
-            lat = pts[:, 1]
+            yf = math.radians(float(self.cfg.get("yaw_fix_deg", 0.0)))
+            if abs(yf) > 1e-6:
+                c, s = math.cos(yf), math.sin(yf)
+                fwd = c * pts[:, 0] - s * pts[:, 1]
+                lat = s * pts[:, 0] + c * pts[:, 1]
+            else:
+                fwd = pts[:, 0].copy()
+                lat = pts[:, 1]
+            # ★距離は「つま先から」(2026-09-04 午後)。以前は骨盤基準(センサ+0.10m)で、壁までの距離が
+            #   実物(機体の前面から測る)より 25cm ほど大きく出ていた
+            fwd = fwd - float(self.cfg.get("front_offset", 0.15))
             z = pts[:, 2]
         return fwd, lat, z
 
@@ -514,8 +526,76 @@ class ObstacleDetector:
         if out["rear_n"] >= 12:
             out["rear_dist"] = round(float(-np.percentile(fwd[mr], 95)), 3)
             out["rear_h"] = round(float(np.median(h[mr])), 3)
+        # --- 正面の壁: 前方セクタの点へ水平面内の直線を RANSAC で当てる(2026-09-04 午後)。
+        #     コリドーの最近点は「手前の物」も拾うので、壁そのものの距離は別に出す
+        out["wall_dist"], out["wall_ang"], out["wall_len"] = self.fit_wall(fwd, lat, h, hm)
+        # --- 4 方向の最近距離(前/後/左/右 ±20 度、h 0.2〜1.6、自分の体の外)。前後の向きの確認用
+        rr = np.hypot(fwd + float(cfg.get("front_offset", 0.15)), lat)
+        azd = np.degrees(np.arctan2(lat, fwd + float(cfg.get("front_offset", 0.15))))
+        hm2 = (h > 0.2) & (h < 1.6) & (rr > 0.45)
+        dirs = {}
+        for key, a0 in (("front", 0.0), ("left", 90.0), ("back", 180.0), ("right", -90.0)):
+            da = (azd - a0 + 180.0) % 360.0 - 180.0
+            mm = hm2 & (np.abs(da) < 20.0)
+            dirs[key] = (round(float(np.percentile(rr[mm], 5)), 2) if int(mm.sum()) >= 10 else None)
+        out["dirs"] = dirs
         out["ok"] = True
         return out
+
+    def fit_wall(self, fwd, lat, h, hm):
+        """前方セクタ(|lat|<1.2m, 0.2<fwd<6m, h 0.25〜1.6)の点に、進行方向にほぼ垂直な直線を当てる。
+        戻り値 (壁までの距離[m] つま先基準・進行線との交点, 壁の法線と進行方向の角度[deg], 壁の見えている幅[m])
+        取れなければ (None, None, None)"""
+        m = hm & (h > 0.25) & (h < 1.6) & (np.abs(lat) < 1.2) & (fwd > 0.2) & (fwd < 6.0)
+        n = int(m.sum())
+        if n < 40:
+            return None, None, None
+        X = np.stack([fwd[m], lat[m]], 1)
+        rng = self._rng
+        cands = []                                     # (内点数, 法線, 通る点, 進行線との交点x)
+        cos35 = math.cos(math.radians(35.0))
+        for _ in range(80):
+            i, j = rng.choice(n, 2, replace=False)
+            d = X[j] - X[i]
+            L = float(np.hypot(d[0], d[1]))
+            if L < 0.15:
+                continue
+            nrm = np.array([-d[1], d[0]]) / L         # 直線の法線
+            if abs(nrm[0]) < cos35:                    # 進行方向にほぼ垂直な面だけ(法線が前方向き)
+                continue
+            r = (X - X[i]) @ nrm
+            cnt = int((np.abs(r) < 0.04).sum())
+            if cnt >= 30:
+                # 進行線(lat=0)との交点の fwd: nrm·(p - X[i]) = 0 で p=(x,0) → x = X[i]·nrm / nrm[0]
+                xh = float((X[i] @ nrm) / nrm[0]) if abs(nrm[0]) > 1e-6 else 1e9
+                cands.append((cnt, nrm, X[i], xh))
+        if not cands:
+            return None, None, None
+        # ★内点が最大の 70% 以上ある候補のうち、いちばん手前の面を採る(壁の奥の面や箱の天面ではなく、
+        #   機体が実際にぶつかる面)。同じ面の候補は交点で寄せる
+        top = max(c[0] for c in cands)
+        good = [c for c in cands if c[0] >= 0.7 * top]
+        best = min(good, key=lambda c: c[3])
+        _cnt, nrm, p0, _xh = best
+        inl = X[np.abs((X - p0) @ nrm) < 0.04]
+        cen = inl.mean(axis=0)
+        u, s, vt = np.linalg.svd(inl - cen, full_matrices=False)
+        d = vt[0]                                       # 直線の向き
+        nrm = np.array([-d[1], d[0]])
+        if nrm[0] < 0:
+            nrm = -nrm
+        ext = float((inl @ d).max() - (inl @ d).min())  # 見えている幅
+        if ext < 0.6:
+            return None, None, None
+        # 進行線(lat=0)との交点: cen + t*d で lat=0 → t = -cen[1]/d[1]
+        if abs(d[1]) < 1e-6:
+            return None, None, None
+        t = -cen[1] / d[1]
+        x_hit = float(cen[0] + t * d[0])
+        ang = math.degrees(math.atan2(nrm[1], nrm[0]))
+        if x_hit < 0.05:
+            return None, None, None
+        return round(x_hit, 3), round(ang, 1), round(ext, 2)
 
 
 # ---------------------------------------------------------------- 速度送信
@@ -596,6 +676,58 @@ class VelSender:
 
 
 # ---------------------------------------------------------------- 自動歩行
+# ---------------------------------------------------------------- LiDAR ヨーの自動較正
+CAL_CELL = 0.05                    # 占有格子のセル[m]
+CAL_HALF = 4.0                     # 格子の半径[m]
+CAL_SHIFT = 0.6                    # 探す平行移動の範囲[m]
+
+
+def occupancy_grid(fwd, lat, mask):
+    """体座標の点を 5cm 格子の占有(bool)にする。static な景色の比較用"""
+    n = int(round(2 * CAL_HALF / CAL_CELL))
+    G = np.zeros((n, n), dtype=bool)
+    f = fwd[mask]
+    l = lat[mask]
+    i = np.floor((f + CAL_HALF) / CAL_CELL).astype(int)
+    j = np.floor((l + CAL_HALF) / CAL_CELL).astype(int)
+    ok = (i >= 0) & (i < n) & (j >= 0) & (j < n)
+    G[i[ok], j[ok]] = True
+    return G
+
+
+def scene_shift(G0, G1):
+    """G0(前)から G1(今)への景色の平行移動 (dx, dy)[m] を総当たりの相関で求める。
+    戻り値 (dx, dy, 最良スコア, スコアの中央値)。景色は機体が動いた分だけ逆向きに流れる"""
+    n = G0.shape[0]
+    k = int(round(CAL_SHIFT / CAL_CELL))
+    best, bi, bj = -1, 0, 0
+    scores = []
+    for di in range(-k, k + 1):
+        for dj in range(-k, k + 1):
+            a0 = G0[max(0, -di):n - max(0, di), max(0, -dj):n - max(0, dj)]
+            a1 = G1[max(0, di):n - max(0, -di), max(0, dj):n - max(0, -dj)]
+            sc = int(np.count_nonzero(a0 & a1))
+            scores.append(sc)
+            if sc > best:
+                best, bi, bj = sc, di, dj
+    med = float(np.median(scores)) if scores else 0.0
+    return bi * CAL_CELL, bj * CAL_CELL, best, med
+
+
+def yaw_error_from_motion(shift, db):
+    """景色の平行移動 shift(検出器の座標)と、オドメトリの機体座標での移動 db から、
+    検出器の前方軸が機体の前方に対して何度ずれているか[deg]を返す(検出器座標で測った機体前方の角)。
+    yaw_fix はこの値を**引く**と合う。整合しなければ None"""
+    sx, sy = shift
+    dbx, dby = db
+    ns = math.hypot(sx, sy)
+    nd = math.hypot(dbx, dby)
+    if nd < 0.15 or ns < 0.6 * nd or ns > 1.4 * nd:
+        return None
+    e = math.degrees(math.atan2(-sy, -sx) - math.atan2(dby, dbx))
+    return (e + 180.0) % 360.0 - 180.0
+
+
 class _Abort(Exception):
     pass
 
@@ -1065,6 +1197,7 @@ class WalkController:
               "step_v": (0.1, 0.4), "step_on": (0.2, 1.5), "step_off": (0.3, 2.0),
               "step_min_on": (0.15, 0.8), "step_est": (0.01, 0.3), "step_max": (1, 60),
               "back_dist": (0.02, 0.5), "self_fwd": (0.1, 0.8), "self_lat": (0.2, 0.8),
+              "yaw_fix_deg": (-360.0, 360.0), "front_offset": (-0.3, 0.5),
               "tele_vx": (0.05, 0.6), "tele_vy": (0.05, 0.3), "tele_om": (0.1, 0.8)}
 
     def __init__(self, robot, log=print, hb_ok=lambda: True, is_sim=False):
@@ -1076,6 +1209,8 @@ class WalkController:
         self.lidar = None
         self.odom = None
         self.det = ObstacleDetector(self.params)
+        self._cal = None             # LiDAR ヨー較正: 静止中の景色の占有格子とそのときのオドメトリ
+        self._cal_last = 0.0
         self.sender = VelSender(self._send_vel, log=log)
         self.auto = None
         self.fsm_id = None
@@ -1140,6 +1275,88 @@ class WalkController:
             self.enabled = False
         return True
 
+    MOUNT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lidar_mount.json")
+
+    def mount_yaw_file(self):
+        """lidar_mount.json の yaw_offset_deg(無ければ 0)。5 秒キャッシュ"""
+        now = time.time()
+        if now - getattr(self, "_myf_t", 0.0) < 5.0:
+            return getattr(self, "_myf", 0.0)
+        v = 0.0
+        try:
+            with open(self.MOUNT_PATH) as f:
+                v = float(json.load(f).get("yaw_offset_deg", 0.0))
+        except Exception:                          # noqa: BLE001
+            pass
+        self._myf, self._myf_t = v, now
+        return v
+
+    def set_mount_yaw(self, deg):
+        """lidar_mount.json の yaw_offset_deg を書き換える([前後を反転]・自動較正)。即時に反映"""
+        deg = (float(deg) + 180.0) % 360.0 - 180.0
+        d = {}
+        try:
+            with open(self.MOUNT_PATH) as f:
+                d = json.load(f)
+        except Exception:                          # noqa: BLE001
+            d = {}
+        d["yaw_offset_deg"] = round(deg, 1)
+        with open(self.MOUNT_PATH, "w") as f:
+            json.dump(d, f, ensure_ascii=False, indent=1)
+        self._myf_t = 0.0
+        return deg
+
+    def _yaw_calib_step(self, pts, frame, od, t):
+        """前進したときに、景色の流れ(LiDAR)とオドメトリの移動方向を比べて LiDAR のヨーを直す。
+        センサ座標の点群だけ。静止中の点群を覚えておき、0.25m 以上動いたら比べる。
+        向きが 4 度以上変わったら比べない(平行移動だけを見る)。20 秒に 1 回まで"""
+        if od is None or self.det.is_world_frame(frame) or self.det.floor is None:
+            self._cal = None
+            return
+        fwd, lat, z = self.det.to_body(pts, frame, None, None)
+        a, b, c, _n = self.det.floor
+        h = z - (fwd * a + lat * b + c)
+        cfg = self.det.cfg
+        own = (fwd > -0.8) & (fwd < cfg.get("self_fwd", 0.4)) & (np.abs(lat) < cfg.get("self_lat", 0.5))
+        mask = (h > 0.3) & (h < 1.6) & ~own
+        cal = getattr(self, "_cal", None)
+        if cal is None:
+            self._cal = dict(G=occupancy_grid(fwd, lat, mask), x=od[1], y=od[2], yaw=od[3], t=t)
+            return
+        dx, dy = od[1] - cal["x"], od[2] - cal["y"]
+        d = math.hypot(dx, dy)
+        dyaw = abs(_wrap(od[3] - cal["yaw"]))
+        if dyaw > math.radians(4.0):
+            self._cal = None
+            return
+        if d < 0.03:
+            if t - cal["t"] > 2.0:                 # 静止中は新しい景色で覚え直す
+                self._cal = dict(G=occupancy_grid(fwd, lat, mask), x=od[1], y=od[2], yaw=od[3], t=t)
+            return
+        if d < 0.25:
+            return
+        if time.time() - getattr(self, "_cal_last", 0.0) < 20.0:
+            self._cal = None
+            return
+        G1 = occupancy_grid(fwd, lat, mask)
+        sx, sy, best, med = scene_shift(cal["G"], G1)
+        cy, sy0 = math.cos(cal["yaw"]), math.sin(cal["yaw"])
+        db = (cy * dx + sy0 * dy, -sy0 * dx + cy * dy)      # 機体座標での移動(前, 左)
+        e = yaw_error_from_motion((sx, sy), db)
+        self._cal = None
+        self._cal_last = time.time()
+        if e is None or best < max(30, 2.0 * med):
+            self.log(f"LiDAR ヨー較正: 判定できず(移動{d:.2f}m 景色の流れ({sx:+.2f},{sy:+.2f}) 相関{best}/中央{med:.0f})")
+            return
+        if abs(e) < 3.0:
+            self.log(f"LiDAR ヨー較正: 向きは合っています(ずれ {e:+.1f}°、移動{d:.2f}m)")
+            return
+        e = max(-60.0, min(60.0, e)) if abs(e) < 120.0 else e   # 前後逆(±180 近く)はそのまま
+        cur = self.mount_yaw_file()
+        new = self.set_mount_yaw(cur - e)
+        self.log(f"★LiDAR のヨーを自動較正: 検出器の前方が機体の前方から {e:+.1f}° ずれていました → "
+                 f"yaw_offset_deg {cur:.0f}→{new:.0f}(lidar_mount.json、即時反映。移動{d:.2f}m 相関{best})")
+
     def _perception(self):
         """5Hzで点群を判定。方策の走行中は enable_sensors(False) されて止まる。"""
         while not self._closing:
@@ -1155,11 +1372,23 @@ class WalkController:
                 mt = getattr(self.lidar, "mount", None)
                 if isinstance(mt, dict) and mt.get("height") and str(frame).startswith("livox_level"):
                     self.det.floor_prior = -float(mt["height"])
+                    # lidar_mount.json のヨー − ブリッジが適用済みのヨー = 今この場で足す分
+                    #  ([前後を反転] を押した直後から効く。ブリッジは次の起動で json を読む)
+                    yf = float(self.mount_yaw_file()) - float(mt.get("yaw_offset_deg", 0.0))
+                    yf = (yf + 180.0) % 360.0 - 180.0
+                    if abs(yf - float(self.params.get("yaw_fix_deg", 0.0))) > 0.01:
+                        self.params["yaw_fix_deg"] = yf
+                        self.det.cfg = dict(self.params)
                 odxy = (od[1], od[2]) if od is not None else None
                 sdir = 1 if self.params.get("side_dir", "left") == "left" else -1
                 r = self.det.update(pts, frame, odxy, self.robot.yaw(), sdir)
                 r["age_ms"] = round((time.time() - t) * 1000.0)
                 r["frame_id"] = frame
+                try:
+                    self._yaw_calib_step(pts, frame, od, t)
+                except Exception as e:             # noqa: BLE001
+                    self._cal = None
+                    self.log(f"(LiDAR ヨー較正の例外: {e})")
                 with self._obs_lock:
                     self._obs = (r, t)
             except Exception as e:                 # noqa: BLE001
@@ -1307,6 +1536,9 @@ class WalkController:
             "frame": obs.get("frame_id", obs.get("frame")),
             "floor_ok": obs.get("floor_ok"), "floor_h": obs.get("floor_h"),
             "why": obs.get("why", ""),
+            "wall_dist": obs.get("wall_dist"), "wall_ang": obs.get("wall_ang"), "wall_len": obs.get("wall_len"),
+            "dirs": obs.get("dirs"),
+            "yaw_fix_deg": float(self.params.get("yaw_fix_deg", 0.0)),
             "lidar_age_ms": (None if t is None else round((now - t) * 1000)),
             "lidar_n": (self.lidar.n_recv if self.lidar is not None else 0),
             "lidar_src": getattr(self.lidar, "source", "-"),
