@@ -68,6 +68,8 @@ WALK_DEFAULTS = dict(
     k_vx=0.45,         # 前後: 実速度/(指令−不感帯)。歩きながら実測で更新し walk_calib.json に残す
     k_vy=0.35,         # 横: 同上
     v_dead=0.10,       # 不感帯[m/s](これ未満の指令では歩かない)
+    cmd_min_walk=0.30, # 動かすときの指令の下限[m/s]。★これ未満の指令だと内蔵歩行は歩き出さず、揺り戻り(後ろへ)だけが残る
+    calib_learn=False, # 速度係数の実測更新。★歩くたびに係数が大きくなり指令が小さくなって後退量が増えた(操作者の報告)→ 既定 OFF
     cmd_max=0.90,      # 指令の上限[m/s]
     final_zone=0.35,   # 目標までこの距離[m]に入ったら「最後の一歩」方式(止まる→短い指令→止めて測る)で寄せる
     yaw_autocal=False, # LiDAR ヨーの自動較正。★壁が主な景色だと壁沿いの平行移動が決まらず ±20° の雑音になった(14:0x)。既定 OFF
@@ -770,30 +772,37 @@ class VelCalib:
         self.k = {"x": float(p.get("k_vx", 0.45)), "y": float(p.get("k_vy", 0.35))}
         self.dead = float(p.get("v_dead", 0.10))
         self.cmd_max = float(p.get("cmd_max", 0.9))
+        self.cmd_min = float(p.get("cmd_min_walk", 0.30))
+        self.learn = bool(p.get("calib_learn", False))
         self.n_upd = {"x": 0, "y": 0}
         self._win = {"x": [], "y": []}
-        try:
-            with open(CALIB_PATH) as f:
-                d = json.load(f)
-            for ax in ("x", "y"):
-                if 0.15 <= float(d.get("k_" + ax, 0)) <= 1.5:
-                    self.k[ax] = float(d["k_" + ax])
-        except Exception:                          # noqa: BLE001
-            pass
+        if self.learn:                              # 学習 OFF のときは固定値だけを使う(ファイルは読まない)
+            try:
+                with open(CALIB_PATH) as f:
+                    d = json.load(f)
+                for ax in ("x", "y"):
+                    if 0.15 <= float(d.get("k_" + ax, 0)) <= 1.5:
+                        self.k[ax] = float(d["k_" + ax])
+            except Exception:                      # noqa: BLE001
+                pass
 
     def to_cmd(self, v_des, axis="x"):
-        """望む実速度[m/s] → 指令[m/s]。|v_des| が 2cm/s 未満なら 0(止める)"""
+        """望む実速度[m/s] → 指令[m/s]。|v_des| が 2cm/s 未満なら 0(止める)。
+        動かすときは cmd_min 以上を必ず出す(内蔵歩行が歩き出さない小さな指令を出さない)"""
         if abs(v_des) < 0.02:
             return 0.0
         c = self.dead + abs(v_des) / max(0.15, self.k[axis])
-        return math.copysign(min(self.cmd_max, c), v_des)
+        c = max(self.cmd_min, min(self.cmd_max, c))
+        return math.copysign(c, v_des)
 
     def per_burst(self, cmd, t_on, axis="x"):
         """指令 cmd を t_on 秒出したときの見込み移動量[m](歩き出しの遅れ 0.25 秒を引く)"""
         return max(0.0, self.k[axis] * max(0.0, abs(cmd) - self.dead) * max(0.0, t_on - 0.25))
 
     def observe(self, axis, cmd, x, t):
-        """(指令, 位置, 時刻) を積み、|指令| が一定で 1 秒続いた窓から k を更新する"""
+        """(指令, 位置, 時刻) を積み、|指令| が一定で 1 秒続いた窓から k を更新する(学習 ON のときだけ)"""
+        if not self.learn:
+            return
         w = self._win[axis]
         w.append((t, cmd, x))
         w[:] = [e for e in w if t - e[0] <= 1.2]
@@ -812,6 +821,8 @@ class VelCalib:
         w[:] = w[-3:]
 
     def save(self):
+        if not self.learn:
+            return
         try:
             with open(CALIB_PATH, "w") as f:
                 json.dump({"k_x": round(self.k["x"], 3), "k_y": round(self.k["y"], 3),
@@ -1593,6 +1604,7 @@ class WalkController:
               "body_half": (0.15, 0.45),
               "speed_mode": (-1, 2), "cmd_dur": (0.5, 5.0),
               "k_vx": (0.15, 1.5), "k_vy": (0.15, 1.5), "v_dead": (0.0, 0.3), "cmd_max": (0.3, 1.2), "final_zone": (0.1, 0.5),
+              "cmd_min_walk": (0.15, 0.6),
               "tele_vx": (0.05, 0.6), "tele_vy": (0.05, 0.3), "tele_om": (0.1, 0.8)}
 
     def __init__(self, robot, log=print, hb_ok=lambda: True, is_sim=False):
@@ -1631,7 +1643,7 @@ class WalkController:
                 v = str(v) if str(v) in ("both", "forward", "side", "back", "step") else "both"
             elif k == "step_dir":
                 v = str(v) if str(v) in ("left", "right", "back", "fwd") else "left"
-            elif k in ("dry_run", "avoid", "align_wall", "wall_track", "gait_cont", "yaw_autocal"):
+            elif k in ("dry_run", "avoid", "align_wall", "wall_track", "gait_cont", "yaw_autocal", "calib_learn"):
                 v = bool(v) if not isinstance(v, str) else (v.lower() in ("1", "true", "on", "yes"))
             else:
                 try:

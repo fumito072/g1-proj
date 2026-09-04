@@ -10,8 +10,8 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +real/walk_calib.json
 diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png' -x '*.patch' -x walk_calib.json /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/README.md g1-proj-main/README.md
 --- /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/README.md	2026-09-03 18:26:29.000000000 +0900
-+++ g1-proj-main/README.md	2026-09-04 15:36:38.165099965 +0900
-@@ -7,10 +7,40 @@
++++ g1-proj-main/README.md	2026-09-04 15:47:10.137277550 +0900
+@@ -7,10 +7,41 @@
  
  ---
  
@@ -42,6 +42,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +| 斜めの回り込み・壁追従・最新 SDK の歩き方(9/4 夕) | `real/autowalk.py`(`_forward`, `_track_wall_heading`)、`real_robot.py`(`set_speed_mode`) | 歩きながら斜めに寄せてギリギリ(余白 8 cm)で回り込み、歩きながら戻る。壁の角度を毎コマ測って垂直を保つ。SetSpeedMode / ContinuousGait / duration 2 s。docs/自動歩行 §6b-7 |
 +| 速度の較正と最後の一歩(9/4 夕) | `real/autowalk.py`(`VelCalib`, `_final_approach`)、`sim_robot.py` | 実機は指令の 4 割しか出ず(実速度≈0.4·(指令−0.1))、壁の前で足踏みのまま居座った。望む速度→指令の較正層(実測で更新・保存)、目標 25 cm 以内は短い歩きで寄せて止まる。ContinuousGait と LiDAR ヨー自動較正は既定 OFF。docs/自動歩行 §6b-8 |
 +| 一度で止めて戻さない(9/4 夕) | `real/autowalk.py`(`_final_approach`) | 短い指令の出し止めで後ろへ揺り戻っていた(1 回 −4〜−16 cm)+目標座標の取り違え。最後 35 cm はゆっくり歩き続けて残り 8 cm で一度だけ止め、補正も戻しもしない。docs/自動歩行 §6b-9 |
++| 学習を止めて後退を抑える(9/4 夕) | `real/autowalk.py`(`VelCalib`) | 速度係数の学習が歩くたびに指令を小さくし、歩き出し前の揺り戻りだけが残って後退量が増えた。学習 OFF・係数固定・動かす指令の下限 0.30。docs/自動歩行 §6b-10 |
 +実機での検証順は 自動歩行 §6(A 距離表示 → B ドライラン → C 十字キー → D 短距離 → E 既定値)。
 +
  ## 引き継ぐ人がまず読むもの(この順で)
@@ -844,8 +845,8 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +  まま(先方のサービス。disable しない)。
 diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png' -x '*.patch' -x walk_calib.json "/tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/docs/\350\207\252\345\213\225\346\255\251\350\241\214_\351\232\234\345\256\263\347\211\251\345\201\234\346\255\242_\346\250\252\347\247\273\345\213\225.md" "g1-proj-main/docs/\350\207\252\345\213\225\346\255\251\350\241\214_\351\232\234\345\256\263\347\211\251\345\201\234\346\255\242_\346\250\252\347\247\273\345\213\225.md"
 --- "/tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/docs/\350\207\252\345\213\225\346\255\251\350\241\214_\351\232\234\345\256\263\347\211\251\345\201\234\346\255\242_\346\250\252\347\247\273\345\213\225.md"	1970-01-01 09:00:00.000000000 +0900
-+++ "g1-proj-main/docs/\350\207\252\345\213\225\346\255\251\350\241\214_\351\232\234\345\256\263\347\211\251\345\201\234\346\255\242_\346\250\252\347\247\273\345\213\225.md"	2026-09-04 15:36:38.165099965 +0900
-@@ -0,0 +1,357 @@
++++ "g1-proj-main/docs/\350\207\252\345\213\225\346\255\251\350\241\214_\351\232\234\345\256\263\347\211\251\345\201\234\346\255\242_\346\250\252\347\247\273\345\213\225.md"	2026-09-04 15:47:10.136277530 +0900
+@@ -0,0 +1,379 @@
 +# 自動歩行 — 前進(壁の手前で自然に停止・障害物は回り込み) / 横歩き(足踏み)(2026-09-04)
 +
 +実装: `real/autowalk.py`(本体)、`real/cockpit.py`(UI と配線)、
@@ -1174,6 +1175,28 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +- 横ずれ保持の望む速度の上限を 0.05 に(較正後の指令 0.33 で横へ強く踏み出していた)。
 +
 +机上試験: 停止後 3 秒の位置変化 +0.3〜+1.0 cm(戻らない)。停止位置は停止距離 +0〜8 cm 手前(許容)。
++
++
++### 6b-10. 「歩かせるたびに後ろへ進む量が増える」→ 学習を止め、歩き出す閾値未満の指令を出さない(2026-09-04 夕)
++
++操作者の報告: 歩かせるたびに後退量が増える。物体を避ける実験でも物体が近づくと後ろへ進む。ハーネスの影響もあるかも。
++
++原因の見立て:
++- 速度係数の実測更新(学習)が歩くたびに係数を大きくし(0.45 → 0.68 …)、同じ望む速度に対する**指令が小さく**
++  なっていった。内蔵歩行は指令が 0.2〜0.3 未満だと歩き出さず、**歩き出し前の後ろへの揺り戻りだけが残る**。
++  減速中・物体へ寄せる場面(望む速度が最低の 0.15 になる)ほど指令が小さく、後退に見えた。
++  ハーネスの張力が後ろ向きに掛かっていれば、この揺り戻りはさらに大きくなる。
++
++対応:
++1. **学習を既定 OFF**(`calib_learn=False`)。係数は固定(前後 0.45・横 0.35・不感帯 0.10)。`walk_calib.json` は
++   読まず、機体の既存ファイルも削除した。
++2. **動かすときの指令の下限 `cmd_min_walk`=0.30**。望む速度から作った指令がこれ未満なら 0.30 に上げる。
++   止めるときは 0。中間の「歩かない・揺れるだけ」の指令を出さない。
++3. 最後の寄せ(35 cm)は §6b-9 のとおり一定の遅い歩きで進み、残り 8 cm で一度だけ止め、戻さない。
++
++ハーネスの有無で差が出るのは主に「歩き出し」と「止まり際」なので、上の 2 点(閾値未満を出さない・止め方を
++一度にする)で吸収する設計。それでも後退が残る場合はログの「停止後 3 秒の位置変化」を見て、
++`cmd_min_walk` を 0.35 に上げる(`walk_param` {"cmd_min_walk":0.35})。
 +
 +## 7. 既知の限界
 +
@@ -1507,8 +1530,8 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
  タブを前面に保つこと**。ブラウザはバックグラウンドのタブでタイマーを
 diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png' -x '*.patch' -x walk_calib.json /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/autowalk.py g1-proj-main/real/autowalk.py
 --- /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/autowalk.py	1970-01-01 09:00:00.000000000 +0900
-+++ g1-proj-main/real/autowalk.py	2026-09-04 15:34:33.023642775 +0900
-@@ -0,0 +1,1973 @@
++++ g1-proj-main/real/autowalk.py	2026-09-04 15:45:23.579060917 +0900
+@@ -0,0 +1,1985 @@
 +#!/usr/bin/env python3
 +"""自動歩行(前進 → 壁の手前で自然に停止 / 障害物は回り込んで元の経路へ / 横歩きは
 +細かい足踏み)と、スマホからの手動操作(押している間だけ動く)のための速度送信。
@@ -1579,6 +1602,8 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +    k_vx=0.45,         # 前後: 実速度/(指令−不感帯)。歩きながら実測で更新し walk_calib.json に残す
 +    k_vy=0.35,         # 横: 同上
 +    v_dead=0.10,       # 不感帯[m/s](これ未満の指令では歩かない)
++    cmd_min_walk=0.30, # 動かすときの指令の下限[m/s]。★これ未満の指令だと内蔵歩行は歩き出さず、揺り戻り(後ろへ)だけが残る
++    calib_learn=False, # 速度係数の実測更新。★歩くたびに係数が大きくなり指令が小さくなって後退量が増えた(操作者の報告)→ 既定 OFF
 +    cmd_max=0.90,      # 指令の上限[m/s]
 +    final_zone=0.35,   # 目標までこの距離[m]に入ったら「最後の一歩」方式(止まる→短い指令→止めて測る)で寄せる
 +    yaw_autocal=False, # LiDAR ヨーの自動較正。★壁が主な景色だと壁沿いの平行移動が決まらず ±20° の雑音になった(14:0x)。既定 OFF
@@ -2281,30 +2306,37 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +        self.k = {"x": float(p.get("k_vx", 0.45)), "y": float(p.get("k_vy", 0.35))}
 +        self.dead = float(p.get("v_dead", 0.10))
 +        self.cmd_max = float(p.get("cmd_max", 0.9))
++        self.cmd_min = float(p.get("cmd_min_walk", 0.30))
++        self.learn = bool(p.get("calib_learn", False))
 +        self.n_upd = {"x": 0, "y": 0}
 +        self._win = {"x": [], "y": []}
-+        try:
-+            with open(CALIB_PATH) as f:
-+                d = json.load(f)
-+            for ax in ("x", "y"):
-+                if 0.15 <= float(d.get("k_" + ax, 0)) <= 1.5:
-+                    self.k[ax] = float(d["k_" + ax])
-+        except Exception:                          # noqa: BLE001
-+            pass
++        if self.learn:                              # 学習 OFF のときは固定値だけを使う(ファイルは読まない)
++            try:
++                with open(CALIB_PATH) as f:
++                    d = json.load(f)
++                for ax in ("x", "y"):
++                    if 0.15 <= float(d.get("k_" + ax, 0)) <= 1.5:
++                        self.k[ax] = float(d["k_" + ax])
++            except Exception:                      # noqa: BLE001
++                pass
 +
 +    def to_cmd(self, v_des, axis="x"):
-+        """望む実速度[m/s] → 指令[m/s]。|v_des| が 2cm/s 未満なら 0(止める)"""
++        """望む実速度[m/s] → 指令[m/s]。|v_des| が 2cm/s 未満なら 0(止める)。
++        動かすときは cmd_min 以上を必ず出す(内蔵歩行が歩き出さない小さな指令を出さない)"""
 +        if abs(v_des) < 0.02:
 +            return 0.0
 +        c = self.dead + abs(v_des) / max(0.15, self.k[axis])
-+        return math.copysign(min(self.cmd_max, c), v_des)
++        c = max(self.cmd_min, min(self.cmd_max, c))
++        return math.copysign(c, v_des)
 +
 +    def per_burst(self, cmd, t_on, axis="x"):
 +        """指令 cmd を t_on 秒出したときの見込み移動量[m](歩き出しの遅れ 0.25 秒を引く)"""
 +        return max(0.0, self.k[axis] * max(0.0, abs(cmd) - self.dead) * max(0.0, t_on - 0.25))
 +
 +    def observe(self, axis, cmd, x, t):
-+        """(指令, 位置, 時刻) を積み、|指令| が一定で 1 秒続いた窓から k を更新する"""
++        """(指令, 位置, 時刻) を積み、|指令| が一定で 1 秒続いた窓から k を更新する(学習 ON のときだけ)"""
++        if not self.learn:
++            return
 +        w = self._win[axis]
 +        w.append((t, cmd, x))
 +        w[:] = [e for e in w if t - e[0] <= 1.2]
@@ -2323,6 +2355,8 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +        w[:] = w[-3:]
 +
 +    def save(self):
++        if not self.learn:
++            return
 +        try:
 +            with open(CALIB_PATH, "w") as f:
 +                json.dump({"k_x": round(self.k["x"], 3), "k_y": round(self.k["y"], 3),
@@ -3104,6 +3138,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +              "body_half": (0.15, 0.45),
 +              "speed_mode": (-1, 2), "cmd_dur": (0.5, 5.0),
 +              "k_vx": (0.15, 1.5), "k_vy": (0.15, 1.5), "v_dead": (0.0, 0.3), "cmd_max": (0.3, 1.2), "final_zone": (0.1, 0.5),
++              "cmd_min_walk": (0.15, 0.6),
 +              "tele_vx": (0.05, 0.6), "tele_vy": (0.05, 0.3), "tele_om": (0.1, 0.8)}
 +
 +    def __init__(self, robot, log=print, hb_ok=lambda: True, is_sim=False):
@@ -3142,7 +3177,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +                v = str(v) if str(v) in ("both", "forward", "side", "back", "step") else "both"
 +            elif k == "step_dir":
 +                v = str(v) if str(v) in ("left", "right", "back", "fwd") else "left"
-+            elif k in ("dry_run", "avoid", "align_wall", "wall_track", "gait_cont", "yaw_autocal"):
++            elif k in ("dry_run", "avoid", "align_wall", "wall_track", "gait_cont", "yaw_autocal", "calib_learn"):
 +                v = bool(v) if not isinstance(v, str) else (v.lower() in ("1", "true", "on", "yes"))
 +            else:
 +                try:
