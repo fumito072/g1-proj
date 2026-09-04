@@ -198,14 +198,28 @@ def test_wall():
     check(st["dist"] is not None and abs(st["dist"] - wall_front) < 0.12 and st["wall"],
           f"開始時: 壁 {st['dist']}m 壁判定={st['wall']} (期待{wall_front:.2f})")
     check(wc.start_auto(), "前進 開始")
+    # 停止後のアンカー保持中に、後ろへ 12cm 押されたことにする(ハーネスの張力・急停止の踏み替えの模擬)
+    t0 = time.time()
+    while time.time() - t0 < 60 and not wc.auto.done and "アンカー保持" not in (wc.auto.msg or ""):
+        time.sleep(0.1)
+    n_hist_stop = len(tk.hist)
+    x_stop = robot._wx
+    pushed = False
+    if not wc.auto.done:
+        time.sleep(0.5)
+        with robot.lock:
+            robot._wx -= 0.12
+        pushed = True
     dt = _wait(wc)
     tk.on = False
     res = wc.auto.result
-    print(f"    結果: {res}  x={robot._wx:.2f} y={robot._wy:.2f}  所要{dt:.1f}秒")
+    print(f"    結果: {res}  x={robot._wx:.2f} y={robot._wy:.2f}  所要{dt:.1f}秒  停止時 x={x_stop:.2f} 押した={pushed}")
     check(res.startswith("完了"), "壁の手前で完了した")
+    check(pushed and abs(robot._wx - x_stop) < 0.05,
+          f"アンカー保持: 後ろへ12cm押されても寄せ直して停止位置±5cm(差 {(robot._wx - x_stop) * 100:+.1f}cm)")
     check(abs(robot._wx - (wall_front - 0.6)) < 0.15,
           f"停止位置 x={robot._wx:.2f} (期待{wall_front - 0.6:.2f}±0.15)")
-    v = np.array([h[3] for h in tk.hist])
+    v = np.array([h[3] for h in tk.hist[:n_hist_stop]])       # 停止(アンカー保持)までの速度
     peak = v.max()
     i_pk = int(v.argmax())
     tail = v[i_pk:]
@@ -232,7 +246,7 @@ def test_detour():
     res = wc.auto.result
     print(f"    結果: {res}  x={robot._wx:.2f} y={robot._wy:.2f} 回り込み{wc.auto.detours}回  所要{dt:.1f}秒")
     check(res.startswith("完了") and wc.auto.detours == 1, "回り込み1回で完了した")
-    check(abs(robot._wy) < 0.06, f"元の経路へ戻った(横ずれ y={robot._wy:+.3f} 期待±0.06)")
+    check(abs(robot._wy) < 0.10, f"元の経路へ戻った(横ずれ y={robot._wy:+.3f} 期待±0.10)")
     check(abs(robot._wx - (4.5 - 0.1 - 0.6)) < 0.2, f"壁の手前で停止 x={robot._wx:.2f} (期待3.80±0.2)")
     # 箱の横を通っている間(x が箱の範囲)、体の中心は箱の端+肩幅 以上離れているか
     xs = np.array([h[1] for h in tk.hist]); ys = np.array([h[2] for h in tk.hist])

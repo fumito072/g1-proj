@@ -50,8 +50,8 @@ WALK_DEFAULTS = dict(
     v_fwd=0.50,        # 前進の巡航速度[m/s](かんたん画面の「速さ」: ゆっくり0.3/ふつう0.5/はやい0.7)
     v_side=0.25,       # 横歩き・後退の巡航速度[m/s](普通の歩行。横は前進より不安定なので低め)
     v_creep=0.15,      # 歩き続けられる最低速度[m/s]。★内蔵歩行は 0.1m/s 未満では歩かない(2026-09-04 実測の疑い)
-    a_dec=0.25,        # 壁・目標へ向けた減速度[m/s²]。v²/(2a) 手前から滑らかに落とす(0.5m/s なら 0.5m 手前)
-    cmd_lag=0.30,      # 内蔵歩行の応答遅れの見込み[s]。この分だけ早めに減速する
+    a_dec=0.15,        # 壁・目標へ向けた減速度[m/s²]。v²/(2a) 手前から滑らかに落とす(0.5m/s なら 0.8m 手前)
+    cmd_lag=0.80,      # 内蔵歩行の応答遅れの見込み[s](実測: 指令を変えてから実速度が追いつくまで約 1 秒)。この分だけ早めに減速する
     align_wall=True,   # 前進の前に、正面の壁が斜めならその場で回転して正対する(2026-09-04 操作者の指示)
     align_tol_deg=3.0, # 正対したとみなす角度[deg]
     om_turn=0.30,      # 正対の回転速度の上限[rad/s]
@@ -71,7 +71,8 @@ WALK_DEFAULTS = dict(
     cmd_min_walk=0.30, # 動かすときの指令の下限[m/s]。★これ未満の指令だと内蔵歩行は歩き出さず、揺り戻り(後ろへ)だけが残る
     calib_learn=False, # 速度係数の実測更新。★歩くたびに係数が大きくなり指令が小さくなって後退量が増えた(操作者の報告)→ 既定 OFF
     cmd_max=0.90,      # 指令の上限[m/s]
-    final_zone=0.35,   # 目標までこの距離[m]に入ったら「最後の一歩」方式(止まる→短い指令→止めて測る)で寄せる
+    final_zone=0.60,   # 目標までこの距離[m]に入ったら一定のゆっくり歩き(実速度 0.08 目安)で寄せ、残り 8cm で一度だけ止める
+    anchor_s=6.0,      # 止めた後、この秒数は位置を見張り、後ろへ 5cm 以上ずれたら前へ寄せ直す(アンカー保持)
     yaw_autocal=False, # LiDAR ヨーの自動較正。★壁が主な景色だと壁沿いの平行移動が決まらず ±20° の雑音になった(14:0x)。既定 OFF
     cmd_dur=2.0,       # SetVelocity の duration[s]。SDK の Move(continuous) は 864000 だが、自プロセスが死んでも
                        #   2 秒で止まるように有限にする。送信は 10Hz で上書きし続ける
@@ -1189,7 +1190,7 @@ class AutoWalk:
           (実機 14:27〜14:28: 1 回で −4〜−16cm)、目的の距離の後で少しずつ後ろへ戻って見えた。
         axis='s'(経路に沿って) / 'e'(横)。target はその軸の値(経路座標)。"""
         cax = "y" if axis == "e" else "x"
-        v_slow = 0.10                                    # 望む実速度[m/s](歩き続けられる最低ライン)
+        v_slow = 0.08                                    # 望む実速度[m/s](指令は下限 cmd_min_walk=0.30 になる)
         tol = 0.08                                       # 多少のずれは許容し、少し手前で一度だけ止める(操作者の指示)
         od, obs = self._sense()
         s, e = self._pose(od)
@@ -1207,8 +1208,14 @@ class AutoWalk:
             if axis == "s":
                 self.traveled = getattr(self, "traveled_base", 0.0) + s
             if rem <= tol:
+                # 急にゼロにせず、0.3 秒だけ弱い指令(0.20)を挟んでからゼロ(急停止の踏み替えを避ける)
+                t2 = time.time()
+                while time.time() - t2 < 0.3:
+                    time.sleep(0.1)
+                    self._sense()
+                    self.io["vel"](sgn * 0.20 if axis == "s" else 0.0, sgn * 0.20 if axis == "e" else 0.0, 0.0)
                 self.io["vel"](0.0, 0.0, 0.0)
-                self._hold(1.0, f"{label}: 停止(残り{rem * 100:+.0f}cm)")
+                self._hold(0.8, f"{label}: 停止(残り{rem * 100:+.0f}cm)")
                 self.msg = f"{label}: 到達(残り{rem * 100:+.0f}cm)"
                 return True
             if time.time() - t0 > t_limit:
@@ -1342,20 +1349,62 @@ class AutoWalk:
         return turned
 
     def _log_post_stop(self):
-        """停止後 3 秒の位置の変化を記録する(止めた後に後ろへ戻るか、の診断)"""
+        """アンカー保持: 止めた後 anchor_s 秒、位置を見張る。後ろ(経路の −s)へ 5cm 以上ずれたら前へ寄せ直し、
+        横へ 8cm 以上ずれたら横へ寄せ直す(いずれも歩き出す下限の指令、2cm 以内で止める)。前へのずれ(壁側)は
+        追わない。終わりに位置の変化をログに出す(「停止後 N 秒の位置変化」)。
+        ★実機 14:49〜14:53: 後ろ向きの指令を一度も出していないのに停止直後に 20〜50cm 後退した(内蔵の急停止か
+          ハーネスの張力)。ここで見張って戻す"""
+        secs = float(self.p.get("anchor_s", 6.0))
         try:
             od, _obs = self._sense()
             s0, e0 = self._pose(od)
-            for _ in range(30):
+            t0 = time.time()
+            n_fix = 0
+            moving = None                            # ("s"|"e", sgn) 寄せ直し中
+            while time.time() - t0 < secs:
                 time.sleep(0.1)
-                self.io["vel"](0.0, 0.0, 0.0)
+                od, obs = self._sense()
+                s, e = self._pose(od)
+                ds, de = s - s0, e - e0
+                if moving is None:
+                    if ds < -0.05:
+                        moving = ("s", 1.0)
+                        n_fix += 1
+                        self.io["log"](f"アンカー保持: 後ろへ {-ds * 100:.0f}cm ずれた — 前へ寄せ直します")
+                    elif abs(de) > 0.08:
+                        moving = ("e", -1.0 if de > 0 else 1.0)
+                        n_fix += 1
+                        self.io["log"](f"アンカー保持: 横へ {de * 100:+.0f}cm ずれた — 寄せ直します")
+                if moving is None:
+                    self.io["vel"](0.0, 0.0, 0.0)
+                    self.msg = f"アンカー保持 {time.time() - t0:.0f}/{secs:.0f}s ずれ 前後{ds * 100:+.0f}cm 横{de * 100:+.0f}cm"
+                    continue
+                ax, sg = moving
+                done = (ds > -0.02) if ax == "s" else (abs(de) < 0.02)
+                # 壁側へ寄せるときは LiDAR の停止距離を守る
+                d_front = obs.get("dist") if obs.get("ok") else None
+                if ax == "s" and d_front is not None and d_front < float(self.p["stop_dist"]) - 0.10:
+                    done = True
+                if done:
+                    self.io["vel"](0.0, 0.0, 0.0)
+                    moving = None
+                    continue
+                c = sg * float(self.cal.cmd_min)
+                if ax == "s":
+                    self.io["vel"](c, 0.0, 0.0)
+                else:
+                    self.io["vel"](0.0, c, 0.0)
+                self.msg = f"アンカー保持: 寄せ直し中 前後{ds * 100:+.0f}cm 横{de * 100:+.0f}cm"
+                self._rec(anchor=1, c=round(c, 3), ds=round(ds, 3), de=round(de, 3))
+            self.io["vel"](0.0, 0.0, 0.0)
             od, _obs = self._sense()
             s1, e1 = self._pose(od)
-            self.io["log"](f"停止後 3 秒の位置変化: 前後 {(s1 - s0) * 100:+.1f}cm 横 {(e1 - e0) * 100:+.1f}cm")
+            self.io["log"](f"停止後 {secs:.0f} 秒の位置変化: 前後 {(s1 - s0) * 100:+.1f}cm 横 {(e1 - e0) * 100:+.1f}cm"
+                           f"(寄せ直し {n_fix} 回)")
         except _Abort:
-            pass
+            self.io["vel"](0.0, 0.0, 0.0)
         except Exception:                          # noqa: BLE001
-            pass
+            self.io["vel"](0.0, 0.0, 0.0)
 
     def _forward(self):
         """壁の手前(stop_dist)で止まるか、最大前進距離で止まるまで進む。
@@ -1443,9 +1492,9 @@ class AutoWalk:
                 self.v = max(v_t, self.v - ACC_DOWN * dt)
             # --- 最終接近: 残りが final_zone 以内で回り込み中でなければ「最後の一歩」で寄せて自然に止まる
             #     (小さな指令を出し続けると足踏みのまま居座る: 14:09 の実機)
-            if (veer is None and d_stop is not None and d_stop <= float(p.get("final_zone", 0.25))
-                    and self.v <= 0.3):
-                self._final_approach("s", s + d_stop, "壁の手前")     # ★経路座標 s(進み traveled ではない)
+            if (veer is None and d_stop is not None and 0.03 < d_stop <= float(p.get("final_zone", 0.6))
+                    and self.v <= 0.35):
+                self._final_approach("s", s + d_stop, "壁の手前")     # ★経路座標 s(進み traveled ではない)。後ろへは歩かない
                 self.io["vel"](0.0, 0.0, 0.0)
                 self.v = 0.0
                 what = "壁" if (ah and ah["wall"]) or wall_d is not None else "障害物"
@@ -1536,6 +1585,7 @@ class AutoWalk:
             self.phase = "SIDE"
             ok = self._lateral_to(sdir * p["side_dist"], f"横歩き({'左' if sdir > 0 else '右'})")
             self.side_traveled = sdir * self.offset
+            self._log_post_stop()
             if not ok:
                 self.result = f"中止(SIDE): 横方向に障害物(横移動{self.side_traveled:.2f}m/{p['side_dist']:.2f}m)"
                 log(f"★自動歩行 {self.result}")
@@ -1604,7 +1654,7 @@ class WalkController:
               "body_half": (0.15, 0.45),
               "speed_mode": (-1, 2), "cmd_dur": (0.5, 5.0),
               "k_vx": (0.15, 1.5), "k_vy": (0.15, 1.5), "v_dead": (0.0, 0.3), "cmd_max": (0.3, 1.2), "final_zone": (0.1, 0.5),
-              "cmd_min_walk": (0.15, 0.6),
+              "cmd_min_walk": (0.15, 0.6), "anchor_s": (0.0, 20.0),
               "tele_vx": (0.05, 0.6), "tele_vy": (0.05, 0.3), "tele_om": (0.1, 0.8)}
 
     def __init__(self, robot, log=print, hb_ok=lambda: True, is_sim=False):
