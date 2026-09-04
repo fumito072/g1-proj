@@ -356,21 +356,41 @@ class SimRobot:
     def ensure_walk_mode(self, log=print):
         if self.custom_active:
             return False, "方策側が制御権を持っています"
-        if self._fsm_id not in (4, 200, 500, 501, 801, 802):
+        if self._fsm_id in (200, 500, 501):
+            self.walk_mode = True
+            return True, self._fsm_id
+        if self._fsm_id in (801, 802):
+            return False, f"FSM={self._fsm_id}(走跑モード)からは歩行へ戻せません。[ダンプ]→[スタンドロック]→[歩行モード]の順で"
+        if self._fsm_id != 4:
             return False, f"FSM={self._fsm_id}: 先に[立つ](ロック立位4)で立たせてから"
-        self._fsm_id = 501                        # 実機: SetFsmId(500) → 501 と読める
+        self._fsm_id = 501                        # 通常運控 3DoF腰(29DoF 機)
         self.walk_mode = True
+        self._balance_mode = 0
         self._upright()
         log("(sim) 歩行 FSM 501 に入りました(運動学モック。バランス制御は模さない)")
+        log("静止立位モード SetBalanceMode(0) → 読み返し 0")
         return True, 501
 
-    def enter_standing_loco(self, log=print):
-        self._fsm_id = 802
-        self.walk_mode = False
-        self.balance_hold = True
-        self._upright()
-        log("(sim) 802(立位の歩行制御)に入りました")
-        return True, 802
+    def get_fsm_mode(self):
+        """0 = 静止 / 1 = 動作中(モック: 速度が残っていれば 1)"""
+        v = getattr(self, "_wv", [0.0, 0.0, 0.0])
+        return 1 if (abs(v[0]) > 0.02 or abs(v[1]) > 0.02 or abs(v[2]) > 0.05) else 0
+
+    def get_balance_mode(self):
+        return getattr(self, "_balance_mode", 0)
+
+    def set_balance_mode(self, mode, log=print):
+        self._balance_mode = int(mode)
+        log(f"(sim) SetBalanceMode({int(mode)})")
+        return True
+
+    def wait_standing(self, timeout=3.0, log=print):
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            if self.get_fsm_mode() == 0:
+                return True
+            time.sleep(0.1)
+        return False
 
     def set_speed_mode(self, mode, log=print):
         log(f"(sim) 速度モード {int(mode)}")

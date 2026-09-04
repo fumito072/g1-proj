@@ -1078,7 +1078,7 @@ class Engine:
             return
         mode = d.get("mode", "forward")
         keep = {k: v for k, v in d.items() if k in ("stop_dist", "side_dir", "side_dist",
-                                                    "avoid", "v_fwd", "v_side", "dry_run", "step_v")}
+                                                    "avoid", "v_fwd", "v_side", "dry_run")}
         if d.get("nudge"):                         # 5cm の微調整は設定を汚さない
             keep.pop("side_dist", None)
             keep.pop("side_dir", None)
@@ -2869,7 +2869,7 @@ table.st td{text-align:right;padding:3px 6px;border-top:1px solid var(--line);wh
 
  <div class="sec"><div class="st">5. 歩行(内蔵制御) — スマホ手動操作 / 自動歩行</div>
   <div class="row">
-   <button onclick="cmd('walk_ready')">&#128694; 歩行モードへ(500/501)</button>
+   <button onclick="cmd('walk_ready')">&#128694; 歩行モードへ(501/200)</button>
    <button class="go" id="walk_auto" onclick="startAuto()">&#9654; 自動歩行 開始</button>
    <button id="walk_stop" style="background:#7a1b1b;border:none;font-weight:700" onclick="cmd('walk_stop')">&#9632; 歩行停止(速度ゼロ)</button>
   </div>
@@ -3390,12 +3390,12 @@ input[type=number]{width:84px}
   <button onclick="cmd('mode_stand')">スタンドロック</button>
   <button onclick="cmd('walk_ready')">歩行モード</button>
  </div>
- <div class="st">スタンドロック=立位(FSM4)。歩行モード=内蔵歩行 loco(500/501)へ。押すと歩き出しうるので接地とE-STOPを確認。着座は自動で 802→UserCtrl を通る。</div>
+ <div class="st">スタンドロック=立位(FSM4)。歩行モード=内蔵の通常運控(501、だめなら200)へ入れて静止立位モードにする。押すと歩き出しうるので接地とE-STOPを確認。着座は自動で 802→UserCtrl を通る。</div>
 </section>
 
 <section><h2>歩く</h2>
  <div class="row">
-  <label>速さ <select id="w_speed" onchange="cmd('walk_param',JSON.stringify({v_fwd:+this.value, v_side:Math.min(0.35,+this.value*0.5)}))"><option value="0.3">ゆっくり 0.3</option><option value="0.5" selected>ふつう 0.5</option><option value="0.7">はやい 0.7</option></select> m/s</label>
+  <label>速さ <select id="w_speed" onchange="cmd('walk_param',JSON.stringify({v_fwd:+this.value}))"><option value="0.5">ゆっくり 0.5</option><option value="0.7" selected>ふつう 0.7</option><option value="0.9">はやい 0.9</option></select>（指令の上限）</label>
   <label>壁の手前で止まる距離 <input id="w_stop" type="number" step="0.05" min="0.3" max="2.5" value="0.60"> m</label>
   <label>横歩き <select id="w_dir"><option value="left">左へ</option><option value="right">右へ</option></select>
    <input id="w_side" type="number" step="0.05" min="0.02" max="3" value="0.50"> m</label>
@@ -3406,8 +3406,7 @@ input[type=number]{width:84px}
   <button class="go" id="b_side" onclick="walkGo('side')">&#9664;&#9654; 横歩き</button>
   <button class="stop" onclick="cmd('walk_stop')">&#9632; 歩行停止</button>
  </div>
- <div class="st" style="margin:8px 0 2px">微調整(10cm 未満)は小刻みステップ、それ以上は普通の歩行。[1歩] は1歩だけ出して何cm動くかを見る。
-  強さ <select id="w_stepv" onchange="cmd('walk_param',JSON.stringify({step_v:+this.value}))"><option value="0.15">弱 0.15</option><option value="0.2" selected>中 0.20</option><option value="0.3">強 0.30</option></select>
+ <div class="st" style="margin:8px 0 2px">微調整(10cm 以下)は 1 歩ずつ、それ以上は普通の歩行。[1歩] は 1 歩だけ出して何cm動くかを見る。
   <span id="stepinfo">-</span></div>
  <div class="btns3">
   <button onclick="step1('left')">&#9664; 左へ1歩</button>
@@ -3460,8 +3459,8 @@ let S={}, META=null, LASTOK=0, GATE_T=null, CD=null;
 function cmd(c,a){fetch('/cmd?c='+c+(a?('&a='+encodeURIComponent(a)):''),{method:'POST'}).catch(function(){})}
 function sel(k){cmd('select',k+':'+document.getElementById('sel_'+k).value)}
 function walkGo(mode){
- const vf=+(document.getElementById('w_speed')||{value:0.5}).value;
- const d={mode:mode, v_fwd:vf, v_side:Math.min(0.35,vf*0.5), stop_dist:+document.getElementById('w_stop').value,
+ const vf=+(document.getElementById('w_speed')||{value:0.7}).value;
+ const d={mode:mode, v_fwd:vf, stop_dist:+document.getElementById('w_stop').value,
   side_dir:document.getElementById('w_dir').value, side_dist:+document.getElementById('w_side').value,
   avoid:document.getElementById('w_avoid').checked};
  cmd('walk_go',JSON.stringify(d));
@@ -3472,7 +3471,6 @@ function step1(dir){cmd('walk_go',JSON.stringify({mode:'step',dir:dir}))}
 function drawWall(w){
  const si=document.getElementById('stepinfo'); if(si) si.textContent='1歩≈'+(w.step_est_cm!=null?w.step_est_cm:'-')+'cm（前回 '+(w.step_last_cm!=null?w.step_last_cm:'-')+'cm、'+(w.steps||0)+'歩）';
  const sp=document.getElementById('w_speed'); if(sp&&w.params&&w.params.v_fwd!=null&&document.activeElement!==sp){ const t=String(+w.params.v_fwd); for(const o of sp.options){ if(String(+o.value)===t) sp.value=o.value; } }
- const sv=document.getElementById('w_stepv'); if(sv&&w.params&&w.params.step_v!=null&&document.activeElement!==sv){ const t=String(+w.params.step_v); for(const o of sv.options){ if(String(+o.value)===t) sv.value=o.value; } }
  const v=document.getElementById('walldist_v'), s=document.getElementById('walldist_s'); if(!v)return;
  const p=w.params||{}, sd=p.stop_dist||0.6;
  const lidarOK=(w.lidar_age_ms!=null&&w.lidar_age_ms<1500);
@@ -3485,7 +3483,7 @@ function drawWall(w){
    if(o) o.textContent=near?('手前 '+od.toFixed(2)+' m に障害物'+(w.width!=null?'（幅 '+w.width+' m）':'')+' — 止まるのはこちら'):''; }
  else if(od==null){ v.textContent='3m 以内に なし'; v.style.color='var(--ok)'; if(o)o.textContent=''; }
  else { v.textContent=od.toFixed(2)+' m'+(w.wall?'（壁）':(w.width!=null?'（幅 '+w.width+' m の障害物）':'')); v.style.color=(od<=sd)?'var(--bad)':(od<=sd+0.5?'var(--warn)':'var(--ok)'); if(o)o.textContent='壁の面は取れていません（手前の物までの距離）'; }
- if(dd&&w.dirs){ const f=x=>(x==null?'-':x.toFixed(2)); dd.textContent='前 '+f(w.dirs.front)+' / 後 '+f(w.dirs.back)+' / 左 '+f(w.dirs.left)+' / 右 '+f(w.dirs.right)+' m（±20°の最近点、つま先から）'+(w.yaw_fix_deg?'　ヨー補正 '+w.yaw_fix_deg+'°':''); }
+ if(dd&&w.dirs){ const f=x=>(x==null?'-':x.toFixed(2)); const si=w.stop_info; dd.textContent='前 '+f(w.dirs.front)+' / 後 '+f(w.dirs.back)+' / 左 '+f(w.dirs.left)+' / 右 '+f(w.dirs.right)+' m（±20°の最近点、つま先から）'+(w.yaw_fix_deg?'　ヨー補正 '+w.yaw_fix_deg+'°':'')+(si?'　直前の停止: ゼロ時 '+f(si.d0)+' → 静止 '+f(si.d1)+' → 3秒後 '+f(si.d2)+(si.t_settle!=null?'（'+si.t_settle.toFixed(1)+'秒で静止）':'（静止を確認できず）'):''); }
  s.textContent='停止距離 '+sd.toFixed(2)+' m　LiDAR '+w.lidar_age_ms+'ms 点'+(w.n_obs||0)+' 床 '+(w.floor_h==null?'-':w.floor_h+'m')
   +(w.mount?'　取付: 高さ'+w.mount.height+'m 傾き'+w.mount.tilt_deg+'°':'')+(w.free_l!=null||w.free_r!=null?'　回り込み可 '+(w.free_l!=null?'左':'')+(w.free_r!=null?'右':''):'');
 }

@@ -28,6 +28,7 @@
 """
 import pathlib
 import threading
+import json
 import time
 
 import numpy as np
@@ -71,7 +72,11 @@ USER_CTRL_CONFIRM_S = 6.0
 #   速度指令を受けるのは loco の 500/501(最新 SDK の Start() = SetFsmId(500)。旧 SDK の Start は 200 で、
 #   当 FW では 200 を送ると 501 と読める)。802 は着座の UserCtrl(7110)への入口としてだけ使う
 WALK_FSMS = {200, 500, 501}
-LOCO_ENTRY_FSMS = (200, 500)      # 歩行へ入れるときに試す順。★当 FW(実測 2026-09-04)は 200 で入り 500 は無反応(6 秒無駄)→ 200 を先に
+# 歩行へ入れるときに試す順(2026-09-04 の調査: 公式表は 500=通常運控(腰1DoF)/501=通常運控 3DoF腰(29DoF 機)/801,802=走跑。
+#   200 は 2026-04 まで SDK の Start() だった旧番号で、当 FW では 200 で歩行に入る。500 は無反応。
+#   コミュニティ(xr_teleoperate PR #312, issue #170)の 29DoF 1.5.3 実績は 1→4→501。立ち上がりが終わるまで SetFsmId は黙って捨てられる)
+LOCO_ENTRY_FSMS = (501, 200)
+RUN_FSMS = {801, 802}             # 走跑(Run)モード。速度指令(7105)を受けない。UserCtrl(7110)の入口としてだけ使う
 
 
 def _rpc(label, fn, *args, timeout=2.5):
@@ -822,6 +827,16 @@ class RealRobot:
         if self._loco is None:
             print("★LocoClient未初期化のため標準モード不可")
             return False
+        # ★歩行 FSM から別のモードへ渡すときは、先に速度をゼロにして静止を待つ。
+        #   動作中(fsm_mode 1)は多くの FSM 切替が拒否される(2026-09-04 の調査・実測)
+        try:
+            if self.get_fsm_id() in WALK_FSMS and name != "walk":
+                _rpc("StopMove", self._loco.SetVelocity, 0.0, 0.0, 0.0, 0.5, timeout=0.5)
+                time.sleep(0.3)
+                if not self.wait_standing(4.0, log=print):
+                    print("★歩行が静止しないまま標準モードへ渡します(切替が拒否される場合があります)")
+        except Exception:                          # noqa: BLE001
+            pass
         # ★これらは「効けばよい」FSM指令。応答が遅いだけで失敗扱いにしない。
         #   2026-08-26 実測: SelectMode("ai") は3.1秒で復帰しているのに
         #   Damp の応答が2.5秒で返らず「失敗→要確認」と出ていた(誤報)。
@@ -833,11 +848,16 @@ class RealRobot:
         elif name == "stand":
             ok, _ = _rpc("SetFsmId(4)", self._loco.SetFsmId, 4, timeout=4.0)
         elif name == "walk":
-            # 最新 SDK の Start() = 500。旧 FW なら 200
-            ok, _ = _rpc("SetFsmId(500)", self._loco.SetFsmId, 500, timeout=4.0)
-            time.sleep(0.6)
-            if self.get_fsm_id() not in WALK_FSMS:
-                ok, _ = _rpc("SetFsmId(200)", self._loco.SetFsmId, 200, timeout=4.0)
+            # 通常運控 501(29DoF 機)→ だめなら旧番号 200。500 は当機で無反応。
+            # ★[歩行モード]は ensure_walk_mode を使うこと(静止待ち+静止立位モードまでやる)。
+            #   ここは詳細画面の「ウォーキング」ボタン用の素の切替
+            ok = False
+            for fid in LOCO_ENTRY_FSMS:
+                _rpc(f"SetFsmId({fid})", self._loco.SetFsmId, fid, timeout=4.0)
+                time.sleep(0.8)
+                if self.get_fsm_id() in WALK_FSMS:
+                    ok = True
+                    break
         elif name == "sit":
             ok, _ = _rpc("SetFsmId(2)", self._loco.SetFsmId, 2, timeout=4.0)
         elif name == "seated":
@@ -937,8 +957,9 @@ class RealRobot:
         """
         if self._loco is None:
             return False
+        # ★応答待ちは送信周期(0.1秒)より短く。0.8秒だと 1 回の遅い応答で 10Hz の流れが途切れる
         ok, _res = _rpc("SetVelocity", self._loco.SetVelocity, float(vx),
-                        float(vy), float(om), float(duration), timeout=0.8)
+                        float(vy), float(om), float(duration), timeout=0.25)
         return bool(ok)
 
     def yaw(self):
@@ -965,14 +986,16 @@ class RealRobot:
         return OdomReader(sub)
 
     def ensure_walk_mode(self, log=print):
-        """内蔵の歩行(loco 500/501)へ入れる。速度指令(SetVelocity)はこの FSM でだけ効く。
+        """内蔵の歩行(通常運控 501 / 旧番号 200)へ入れ、静止立位モード(SetBalanceMode 0)にする。
+        速度指令(SetVelocity 7105)はこの FSM でだけ効く。
 
-        遷移元: ロック立位(4)。802/801(走行29dof)に居るときは一度 4 に戻してから入る。
-        ダンピング/ゼロトルクからは自動で立ち上げない(立ち上がりは操作者が[立つ]を押して目で見る)。
-        ★最新 SDK(unitree_sdk2_python master)の Start() は SetFsmId(500)。機体に入っている旧 SDK の
-          Start() は 200 で、当 FW では 200 を送ると 501 と読める(9/3 のログ)。500 → だめなら 200 の順。
-        ★2026-09-04 の実測: 802 では SetVelocity が効かず一歩も出なかった(4→802 の旧経路)。
-        ★歩行制御が動くので、必ず接地させ、リモコンの E-STOP を握って押すこと。
+        手順(2026-09-04 の調査に基づく。docs/自動歩行 §6b-15):
+          1. ロック立位(4)からだけ入る。ダンピングからは自動で立ち上げない(操作者が[立つ]を押して目で見る)。
+             走跑(801/802)に居るときは戻せない(公式の順は ダンプ→ロック立位→運控)。案内を出して失敗を返す。
+          2. SetFsmId(501)。立ち上がりの動作中は黙って捨てられるので、0.5 秒ごとに送り直し GetFsmId で確認(最大 4 秒)。
+             だめなら 200(旧 Start)。500 は当機で無反応なので試さない。
+          3. 静止(GetFsmMode == 0)を待ち、SetBalanceMode(0) = 静止立位モード(速度ゼロで足踏みを止める。
+             1 だと足踏みを続ける = リモコン START 二度押しと同じ)。GetBalanceMode で確認。
         戻り値: (成功か, いまのFSM)
         """
         if self.custom_active or self._stream_on:
@@ -982,64 +1005,95 @@ class RealRobot:
         if not self._select_ai():
             return False, "制御サービスを復帰できない"
         f = self.get_fsm_id()
-        if f in WALK_FSMS:
-            return True, f
-        if f in (801, 802):
-            # 802(立位の歩行制御)から歩行(200)へ。直接通ればそれで良い。だめならロック立位(4)を経由
-            log(f"FSM {f}(走行29dof)から歩行(200)へ戻します")
-            _rpc("SetFsmId(200)", self._loco.SetFsmId, 200, timeout=4.0)
-            t0 = time.time()
-            while time.time() - t0 < 3.0:
-                time.sleep(0.4)
-                f = self.get_fsm_id()
-                if f in WALK_FSMS:
-                    log(f"歩行 FSM {f} に到達({time.time() - t0:.1f}秒)。速度指令が効く状態です")
-                    return True, f
-            log(f"802→200 は通らなかった(いま {f})。ロック立位(4)を経由します")
-            _rpc("SetFsmId(4)", self._loco.SetFsmId, 4, timeout=4.0)
-            t0 = time.time()
-            while time.time() - t0 < 4.0:
-                time.sleep(0.4)
-                f = self.get_fsm_id()
-                if f == 4:
-                    break
+        if f not in WALK_FSMS:
+            if f in RUN_FSMS:
+                return False, (f"FSM={f}(走跑モード)からは歩行へ戻せません。[ダンプ]→[スタンドロック]→[歩行モード]の順で")
             if f != 4:
-                return False, f"FSM={f}: 4(ロック立位)へ戻せない。[立つ]を押してから"
-        if f != 4:
-            return False, f"FSM={f}: 先に[立つ](ロック立位4)で立たせ、接地を確認してから"
-        for fid in LOCO_ENTRY_FSMS:
-            log(f"★歩行(FSM {fid})へ遷移します — 歩行制御が動きます。機体を接地させ、リモコンE-STOPを握ってください")
-            ok, res = _rpc(f"SetFsmId({fid})", self._loco.SetFsmId, fid, timeout=4.0)
-            t0 = time.time()
-            while time.time() - t0 < 3.0:
-                time.sleep(0.4)
-                f = self.get_fsm_id()
-                if f in WALK_FSMS:
-                    log(f"歩行 FSM {f} に到達({time.time() - t0:.1f}秒)。速度指令が効く状態です")
-                    return True, f
-            log(f"FSM {fid} へ入れなかった(いま {f}、応答 {res})")
-        return False, f
+                return False, f"FSM={f}: 先に[立つ](ロック立位4)で立たせ、接地を確認してから"
+            entered = None
+            for fid in LOCO_ENTRY_FSMS:
+                log(f"★歩行(FSM {fid})へ遷移します — 歩行制御が動きます。機体を接地させ、リモコンE-STOPを握ってください")
+                t0 = time.time()
+                while time.time() - t0 < 4.0:
+                    _rpc(f"SetFsmId({fid})", self._loco.SetFsmId, fid, timeout=2.0)   # 立ち上がり中は捨てられるので送り直す
+                    time.sleep(0.5)
+                    f = self.get_fsm_id()
+                    if f in WALK_FSMS:
+                        entered = f
+                        break
+                if entered is not None:
+                    log(f"歩行 FSM {entered} に到達({time.time() - t0:.1f}秒)。速度指令が効く状態です")
+                    break
+                log(f"FSM {fid} へ入れなかった(いま {f})")
+            if entered is None:
+                return False, f
+        # 3) 静止を待って、静止立位モード(足踏みを止める)にする。
+        #    ★動作中(fsm_mode 1)に送っても効かないことがあるので、待ってから送り、だめなら 1 度やり直す
+        still = self.wait_standing(5.0, log=log)
+        if not still:
+            log("静止立位モードの設定: まだ動作中(または fsm_mode が読めない)ため、1 秒待ってから送ります")
+            time.sleep(1.0)
+        if not self.set_balance_mode(0, log=log):
+            time.sleep(1.0)
+            self.set_balance_mode(0, log=log)
+        return True, self.get_fsm_id()
 
-    def enter_standing_loco(self, log=print):
-        """目的地で足踏みをやめる: 歩行(200)から 802(走行29dof)へ。802 は速度指令を受けず立位で静止する
-        (2026-09-04 実測: 802 で SetVelocity を送っても動かない / 9/3: 200・501・4 から 802 へ 0.4 秒で通る)。
-        ★4(ロック立位)は 200 から受け付けない(15:39 実測: SetFsmId(4) 応答 0 だが FSM は 200 のまま)。
-        戻り値: (成功か, いまのFSM)"""
+    def get_fsm_mode(self):
+        """GetFsmMode(7002): 0 = 静止(static) / 1 = 動作中(dynamic)。取れなければ None。
+        「止まった」の公式の判定。動作中は多くの FSM 切替が拒否される"""
         if self._loco is None:
-            return False, None
-        for i in range(2):
-            _rpc("SetFsmId(802)", self._loco.SetFsmId, 802, timeout=4.0)
-            t0 = time.time()
-            while time.time() - t0 < 3.0:
-                time.sleep(0.3)
-                f = self.get_fsm_id()
-                if f == 802:
-                    return True, f
-            log(f"802 への切替: まだ FSM {f}(試行 {i + 1})")
-        return False, self.get_fsm_id()
+            return None
+        ok, res = _rpc("GetFsmMode", self._loco._Call, 7002, "{}", timeout=1.0)
+        try:
+            code, data = res
+            if code != 0:
+                return None
+            return int(json.loads(data)["data"])
+        except Exception:                          # noqa: BLE001
+            return None
+
+    def get_balance_mode(self):
+        """GetBalanceMode(7003): 0 = 静止立位(速度ゼロで足踏みを止める) / 1 = 足踏み継続。取れなければ None"""
+        if self._loco is None:
+            return None
+        ok, res = _rpc("GetBalanceMode", self._loco._Call, 7003, "{}", timeout=1.0)
+        try:
+            code, data = res
+            if code != 0:
+                return None
+            return int(json.loads(data)["data"])
+        except Exception:                          # noqa: BLE001
+            return None
+
+    def set_balance_mode(self, mode, log=print):
+        """SetBalanceMode(7102)。0 = 静止立位(BalanceStand)、1 = 足踏み継続(ContinuousGait)。読み返して確認"""
+        if self._loco is None:
+            return False
+        _rpc("SetBalanceMode", self._loco.SetBalanceMode, int(mode), timeout=2.0)
+        time.sleep(0.2)
+        got = self.get_balance_mode()
+        log(f"静止立位モード SetBalanceMode({int(mode)}) → 読み返し {got if got is not None else '(この FSM では未対応)'}")
+        return got == int(mode) if got is not None else True
+
+    def wait_standing(self, timeout=5.0, log=print):
+        """GetFsmMode が 0(静止)を 2 回続けて返すまで待つ。戻り値: 静止したか。
+        読めない FW(None)では待たずに False を返す(呼び出し側が判断する)"""
+        t0 = time.time()
+        n = 0
+        while time.time() - t0 < timeout:
+            m = self.get_fsm_mode()
+            if m is None:
+                return False
+            n = n + 1 if m == 0 else 0
+            if n >= 2:
+                return True
+            time.sleep(0.2)
+        log(f"静止待ち: {timeout:.0f}秒たっても fsm_mode が動作中(1)のままです")
+        return False
 
     def set_speed_mode(self, mode, log=print):
-        """SetSpeedMode(7107、最新 SDK)。-1/0/1/2(SDK 例の取りうる値。0=標準)。歩行 FSM でだけ効く"""
+        """SetSpeedMode(7107、最新 SDK)。公式: 0..3 = 最高速 1.0/2.0/2.7/3.0 m/s、走跑モード(801/802)向け。
+        通常運控(501/200)で効くかは未確認。通常運控の速度段はリモコンの L1 二度押し(高速)/L2 二度押し(低速)"""
         if self._loco is None:
             return False
         self._regist_user_apis()
