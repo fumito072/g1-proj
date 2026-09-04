@@ -426,6 +426,11 @@ class SimRobot:
                 if (abs(tgt[0]) < 0.10 and abs(tgt[1]) < 0.10 and abs(tgt[2]) < 0.15) \
                         or time.time() - getattr(self, "_wstart", 0.0) < 0.25:
                     tgt = (0.0, 0.0, 0.0)
+                else:
+                    # 実機 14:08 のログ: 実速度 ≈ 0.4·(指令 − 0.10)。回転はそのまま
+                    def _nl(v):
+                        return math.copysign(0.4 * max(0.0, abs(v) - 0.10), v) if abs(v) >= 0.10 else 0.0
+                    tgt = (_nl(tgt[0]), _nl(tgt[1]), tgt[2])
                 a = min(1.0, dt / 0.4)
                 self._wv = [self._wv[i] + (tgt[i] - self._wv[i]) * a
                             for i in range(3)]

@@ -60,8 +60,17 @@ WALK_DEFAULTS = dict(
     veer_v=0.35,       # 回り込み(斜め歩き)中の前進速度の上限[m/s]
     # 最新 SDK(unitree_sdk2 例: Start→StandUp→SetSpeedMode→ContinuousGait→Move)の歩き方(2026-09-04 夕)
     speed_mode=0,      # SetSpeedMode(7107): -1/0/1/2(SDK 例の取りうる値。0=標準)。歩行モードに入るときに送る
-    gait_cont=True,    # ContinuousGait(SetBalanceMode 1): 自動歩行中は速度ゼロでも足踏みを続け、歩き出し・止まりの
+    gait_cont=False,   # ContinuousGait(SetBalanceMode 1): 速度ゼロでも足踏みを続ける。★実機 14:09 で壁の手前で
+                       #   足踏みのまま居座った(操作者の指摘)ので既定 OFF。0 なら指令ゼロで自然に立ち止まる
                        #   段差を無くす。歩行が終わったら 0(静止立位)へ戻す
+    # ★速度の較正(2026-09-04 14:08 の実機ログ): 指令 0.50 で実速度 0.15〜0.20、0.42→0.13、0.35→0.08、0.20→0.04、
+    #   0.15→0.02。実速度 ≈ k·(指令 − 不感帯) で k≈0.4、不感帯≈0.10。この層が無いと「遅い」「壁の前で足踏みのまま居座る」
+    k_vx=0.45,         # 前後: 実速度/(指令−不感帯)。歩きながら実測で更新し walk_calib.json に残す
+    k_vy=0.35,         # 横: 同上
+    v_dead=0.10,       # 不感帯[m/s](これ未満の指令では歩かない)
+    cmd_max=0.90,      # 指令の上限[m/s]
+    final_zone=0.35,   # 目標までこの距離[m]に入ったら「最後の一歩」方式(止まる→短い指令→止めて測る)で寄せる
+    yaw_autocal=False, # LiDAR ヨーの自動較正。★壁が主な景色だと壁沿いの平行移動が決まらず ±20° の雑音になった(14:0x)。既定 OFF
     cmd_dur=2.0,       # SetVelocity の duration[s]。SDK の Move(continuous) は 864000 だが、自プロセスが死んでも
                        #   2 秒で止まるように有限にする。送信は 10Hz で上書きし続ける
     stop_dist=0.60,    # 壁(障害物)のこの距離手前で止まる[m](骨盤基準)
@@ -91,7 +100,7 @@ WALK_DEFAULTS = dict(
     back_dist=0.05,    # 後退の距離[m]
     # 小刻みステップ(2026-09-04 午後): 内蔵歩行が「確実に一歩出る」短い速度指令を出し、
     # 止めてオドメトリで測る、を繰り返す。弱いパルス(0.08m/s×0.5s)では一歩も出なかった実測から
-    step_v=0.20,       # 1歩の指令速度[m/s](内蔵歩行の不感帯より上)
+    step_v=0.15,       # 1歩の望む実速度[m/s](較正で指令に直す。指令は 0.4 前後になる)
     step_on=0.6,       # 1歩の指令時間[s]
     step_off=1.0,      # 止めて着地と計測を待つ時間[s]
     step_min_on=0.3,   # 残りが小さいときの最短指令時間[s]
@@ -749,6 +758,68 @@ def yaw_error_from_motion(shift, db):
     return (e + 180.0) % 360.0 - 180.0
 
 
+# ---------------------------------------------------------------- 速度の較正(指令 → 実速度)
+CALIB_PATH = os.environ.get("G1_WALK_CALIB") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "walk_calib.json")
+
+
+class VelCalib:
+    """内蔵歩行の「指令 → 実速度」の非線形(実速度 ≈ k·(指令 − 不感帯))を持ち、望む実速度から指令を作る。
+    歩行中に (指令, オドメトリの実速度) を 1 秒窓で集めて k を更新し、walk_calib.json に残す(次回も使う)。"""
+
+    def __init__(self, p):
+        self.k = {"x": float(p.get("k_vx", 0.45)), "y": float(p.get("k_vy", 0.35))}
+        self.dead = float(p.get("v_dead", 0.10))
+        self.cmd_max = float(p.get("cmd_max", 0.9))
+        self.n_upd = {"x": 0, "y": 0}
+        self._win = {"x": [], "y": []}
+        try:
+            with open(CALIB_PATH) as f:
+                d = json.load(f)
+            for ax in ("x", "y"):
+                if 0.15 <= float(d.get("k_" + ax, 0)) <= 1.5:
+                    self.k[ax] = float(d["k_" + ax])
+        except Exception:                          # noqa: BLE001
+            pass
+
+    def to_cmd(self, v_des, axis="x"):
+        """望む実速度[m/s] → 指令[m/s]。|v_des| が 2cm/s 未満なら 0(止める)"""
+        if abs(v_des) < 0.02:
+            return 0.0
+        c = self.dead + abs(v_des) / max(0.15, self.k[axis])
+        return math.copysign(min(self.cmd_max, c), v_des)
+
+    def per_burst(self, cmd, t_on, axis="x"):
+        """指令 cmd を t_on 秒出したときの見込み移動量[m](歩き出しの遅れ 0.25 秒を引く)"""
+        return max(0.0, self.k[axis] * max(0.0, abs(cmd) - self.dead) * max(0.0, t_on - 0.25))
+
+    def observe(self, axis, cmd, x, t):
+        """(指令, 位置, 時刻) を積み、|指令| が一定で 1 秒続いた窓から k を更新する"""
+        w = self._win[axis]
+        w.append((t, cmd, x))
+        w[:] = [e for e in w if t - e[0] <= 1.2]
+        if len(w) < 6 or t - w[0][0] < 1.0:
+            return
+        cmds = [abs(e[1]) for e in w]
+        if min(cmds) < self.dead + 0.15 or max(cmds) - min(cmds) > 0.06:
+            return
+        dx = abs(w[-1][2] - w[0][2]) / (w[-1][0] - w[0][0])
+        c = sum(cmds) / len(cmds)
+        k_obs = dx / max(0.05, c - self.dead)
+        if 0.1 <= k_obs <= 1.6:
+            a = 0.3 if self.n_upd[axis] < 5 else 0.15
+            self.k[axis] = min(1.5, max(0.15, (1 - a) * self.k[axis] + a * k_obs))
+            self.n_upd[axis] += 1
+        w[:] = w[-3:]
+
+    def save(self):
+        try:
+            with open(CALIB_PATH, "w") as f:
+                json.dump({"k_x": round(self.k["x"], 3), "k_y": round(self.k["y"], 3),
+                           "n_x": self.n_upd["x"], "n_y": self.n_upd["y"], "t": time.time()}, f)
+        except Exception:                          # noqa: BLE001
+            pass
+
+
 class _Abort(Exception):
     pass
 
@@ -785,6 +856,7 @@ class AutoWalk:
         mode0 = self.p.get("mode", "both")
         self.need_lidar = (mode0 not in ("side", "back")
                            and not (mode0 == "step" and self.p.get("step_dir", "left") != "fwd"))
+        self.cal = VelCalib(self.p)  # 指令 → 実速度 の較正(walk_calib.json)
         self.step_last = None        # 直近の1歩の移動量[m](指令方向が正)
         self.step_est = float(self.p.get("step_est", 0.06))
         self.steps = 0
@@ -817,6 +889,10 @@ class AutoWalk:
         finally:
             self.io["stop"]("自動歩行 終了")
             self.phase = "DONE" if self.result.startswith("完了") else "ABORT"
+            try:
+                self.cal.save()
+            except Exception:                      # noqa: BLE001
+                pass
             self.done = True
             self._flush()
 
@@ -911,6 +987,7 @@ class AutoWalk:
         n = 0
         last_sgn = 0
         reversals = 0
+        self._step_recent = []
         net = 0.0                              # 指令方向へ進んだ量の合計(オドメトリ雑音に強い判定用)
         best = 0.0                             # 1歩で最も進んだ量
         while True:
@@ -946,7 +1023,8 @@ class AutoWalk:
                     return False
             frac = 1.0 if single else min(1.0, abs(rem) / est)
             t_on = max(float(p["step_min_on"]), float(p["step_on"]) * frac)
-            v = sgn * float(p["step_v"])
+            # step_v は「望む実速度」。較正で指令に直す(実機は指令の 4 割ほどしか出ない)
+            v = sgn * abs(self.cal.to_cmd(float(p["step_v"]), "y" if axis == "e" else "x"))
             n += 1
             last_sgn = sgn
             xa = x
@@ -972,12 +1050,15 @@ class AutoWalk:
             self.steps = n
             net += d
             best = max(best, d)
+            recent = getattr(self, "_step_recent", [])
+            recent = (recent + [d])[-3:]
+            self._step_recent = recent
             if d > 0.005:
                 est = d if n == 1 else 0.6 * est + 0.4 * d
                 self.step_est = est
             self.io["log"](f"{label}: {n}歩目 {d * 100:+.1f}cm(指令{v:+.2f}m/s×{t_on:.1f}s)"
                            f" 残り{(target - x) * 100:+.1f}cm 1歩の推定{est * 100:.1f}cm")
-            if n >= 3 and net < 0.015 and best < 0.01:
+            if n >= 3 and sum(recent) < 0.015:      # 直近 3 歩の合計が 1.5cm 未満(1 歩の雑音 ±0.5cm に強い)
                 self.io["vel"](0.0, 0.0, 0.0)
                 raise _Abort(f"中止({self.phase}): 3歩で進み{net * 100:.1f}cm — 歩行モードが"
                              "速度指令に応じていない(十字キーで歩けるか確認。docs 自動歩行 §6b-3)")
@@ -1063,19 +1144,83 @@ class AutoWalk:
                     self.io["vel"](0.0, 0.0, 0.0)
                     self.msg = f"{label}: 前方{d_front:.2f}m(停止距離{p['stop_dist']:.2f}m) — 前へは出しません"
                     return False
+            # 残りが final_zone 以内なら「最後の一歩」で寄せて自然に止まる
+            if abs(rem) <= float(p.get("final_zone", 0.25)):
+                self._final_approach(axis, target, label)
+                return True
             v_t = speed_profile(v_max, abs(rem), v_min, a_dec, abs(v), lag, tol)
             if v_t > abs(v):
                 v = min(v_t, abs(v) + ACC_UP * dt)
             else:
                 v = max(v_t, abs(v) - ACC_DOWN * dt)
             vcmd = sgn * v
+            cax = "y" if axis == "e" else "x"
+            c = self.cal.to_cmd(vcmd, cax)
             if axis == "e":
-                self.io["vel"](0.0, vcmd, self._om())
+                self.io["vel"](0.0, c, self._om())
             else:
                 vy = float(np.clip(-LAT_KP * e, -LAT_VY_MAX, LAT_VY_MAX))
-                self.io["vel"](vcmd, vy, self._om())
-            self.msg = f"{label}: v={vcmd:+.2f}m/s 残り{rem * 100:+.0f}cm"
-            self._rec(v=round(vcmd, 3), x=round(float(x), 3), rem=round(float(rem), 3))
+                self.io["vel"](c, self.cal.to_cmd(vy, "y"), self._om())
+            self.cal.observe(cax, c, x, now)
+            self.msg = f"{label}: 望む{vcmd:+.2f}m/s(指令{c:+.2f}) 残り{rem * 100:+.0f}cm"
+            self._rec(v=round(vcmd, 3), c=round(c, 3), x=round(float(x), 3), rem=round(float(rem), 3))
+
+    def _final_approach(self, axis, target, label):
+        """最後の一歩: 残り距離を較正モデルで指令時間に換算し、短く歩いて止め、測って繰り返す(最大 4 回)。
+        小さな指令を出し続ける(足踏みで居座る)代わりに、自然に歩いて自然に止まる。
+        axis='s'(前後) / 'e'(横)。target はその軸の目標。到達判定は 5cm"""
+        cax = "y" if axis == "e" else "x"
+        cmd_mag = 0.40 if cax == "x" else 0.35
+        tol = 0.05
+        # まず止まって静定(歩いている途中から短い指令を足すと、惰性ぶんが上乗せされて行き過ぎる)
+        self._hold(0.7, f"{label}: 止まって残りを測る")
+        for i in range(4):
+            od, obs = self._sense()
+            s, e = self._pose(od)
+            x = s if axis == "s" else e
+            rem = target - x
+            if abs(rem) <= tol:
+                self.msg = f"{label}: 到達(残り{rem * 100:+.0f}cm)"
+                return True
+            sgn = 1.0 if rem > 0 else -1.0
+            per_s = self.cal.k[cax] * max(0.0, cmd_mag - self.cal.dead)     # 指令中の実速度[m/s]
+            t_on = 0.25 + abs(rem) / max(0.05, per_s)                          # 歩き出し 0.25 秒 + 距離/速度
+            t_on = max(0.35, min(1.5, t_on))
+            c = sgn * cmd_mag
+            t1 = time.time()
+            xa = x
+            while time.time() - t1 < t_on:
+                time.sleep(0.1)
+                od, obs = self._sense()
+                s, e = self._pose(od)
+                if axis == "e":
+                    self.io["vel"](0.0, c, self._om())
+                else:
+                    self.io["vel"](c, self.cal.to_cmd(float(np.clip(-LAT_KP * e, -LAT_VY_MAX, LAT_VY_MAX)), "y"),
+                                   self._om())
+                self.msg = f"{label}: 最後の一歩 {i + 1}回目 指令{c:+.2f}×{t_on:.1f}s 残り{rem * 100:+.0f}cm"
+                self._rec(final=i + 1, c=round(c, 3), t_on=round(t_on, 2), x=round(float(s if axis == 's' else e), 3))
+            self._hold(0.8, f"{label}: 止まって測る")
+            od, obs = self._sense()
+            s, e = self._pose(od)
+            x = s if axis == "s" else e
+            moved = (x - xa) * sgn
+            # 実測で較正を更新(移動量/(指令−不感帯)/(時間−歩き出し))
+            if moved > 0.01 and t_on > 0.3:
+                k_obs = moved / max(0.05, cmd_mag - self.cal.dead) / max(0.1, t_on - 0.25)
+                if 0.1 <= k_obs <= 1.6:
+                    self.cal.k[cax] = min(1.5, max(0.15, 0.7 * self.cal.k[cax] + 0.3 * k_obs))
+            self.io["log"](f"{label}: 最後の一歩 {i + 1}回目 {moved * 100:+.1f}cm(指令{c:+.2f}×{t_on:.1f}s) 残り{(target - x) * 100:+.1f}cm")
+            self.offset = e
+            if axis == "s":
+                self.traveled = getattr(self, "traveled_base", 0.0) + s
+        od, obs = self._sense()
+        s, e = self._pose(od)
+        self.offset = e
+        if axis == "s":
+            self.traveled = getattr(self, "traveled_base", 0.0) + s
+        x = s if axis == "s" else e
+        return abs(target - x) <= tol * 2
 
     def _lateral_to(self, e_target, label):
         """経路線からのずれ e を e_target へ。10cm 以上は普通の歩行、未満は小刻みステップ。
@@ -1279,6 +1424,18 @@ class AutoWalk:
                 self.v = min(v_t, self.v + ACC_UP * dt)
             else:
                 self.v = max(v_t, self.v - ACC_DOWN * dt)
+            # --- 最終接近: 残りが final_zone 以内で回り込み中でなければ「最後の一歩」で寄せて自然に止まる
+            #     (小さな指令を出し続けると足踏みのまま居座る: 14:09 の実機)
+            if (veer is None and d_stop is not None and d_stop <= float(p.get("final_zone", 0.25))
+                    and self.v <= 0.3):
+                self._final_approach("s", self.traveled + d_stop, "壁の手前")
+                self.io["vel"](0.0, 0.0, 0.0)
+                self.v = 0.0
+                what = "壁" if (ah and ah["wall"]) or wall_d is not None else "障害物"
+                od, obs = self._sense()
+                self.io["log"](f"{what} {obs.get('dist') if obs.get('dist') is not None else dist}m 手前で止まりました"
+                               f"(停止距離{p['stop_dist']:.2f}m)  前進{self.traveled:.2f}m")
+                return "wall"
             # --- 横速度: 回り込み中は目標の横位置へ(連続プロファイル)、それ以外は経路線を保つ
             if veer is not None:
                 rem_e = veer["e_t"] - e
@@ -1313,14 +1470,20 @@ class AutoWalk:
             else:
                 vy_now = max(vy_t, vy_now - ACC_UP * dt)
             om = self._om() if (self.v > 0.03 or abs(vy_now) > 0.03) else 0.0
-            self.io["vel"](self.v, vy_now, om)
+            cx = self.cal.to_cmd(self.v, "x")
+            cy = self.cal.to_cmd(vy_now, "y")
+            self.io["vel"](cx, cy, om)
+            self.cal.observe("x", cx, s, now)
+            if abs(cy) > 0.02:
+                self.cal.observe("y", cy, e, now)
             wa = obs.get("wall_ang")
             wa_s = "" if wa is None else f" 壁の角度{wa:+.0f}°"
             d_s = "---" if dist is None else f"{dist:.2f}m"
             self.msg = (f"{'回り込み' if veer is not None else '前進'} v={self.v:.2f} 横{vy_now:+.2f} 回転{om:+.2f} | 前方 "
                         f"{d_s}{'(壁)' if (ah and ah['wall']) else ''}{wa_s}"
                         f" | {self.traveled:.2f}m ずれ{e * 100:+.0f}cm")
-            self._rec(vx=round(self.v, 3), vy=round(vy_now, 3), om=round(om, 3), dist=dist,
+            self._rec(vx=round(self.v, 3), vy=round(vy_now, 3), om=round(om, 3), cx=round(cx, 3), cy=round(cy, 3),
+                      kx=round(self.cal.k["x"], 3), dist=dist,
                       s=round(self.traveled, 3), e=round(e, 3), n=obs.get("n_obs"),
                       wall_ang=obs.get("wall_ang"), veer=(None if veer is None else veer["stage"]))
 
@@ -1422,6 +1585,7 @@ class WalkController:
               "align_inplace_deg": (2.0, 45.0), "veer_v": (0.15, 0.6),
               "body_half": (0.15, 0.45),
               "speed_mode": (-1, 2), "cmd_dur": (0.5, 5.0),
+              "k_vx": (0.15, 1.5), "k_vy": (0.15, 1.5), "v_dead": (0.0, 0.3), "cmd_max": (0.3, 1.2), "final_zone": (0.1, 0.5),
               "tele_vx": (0.05, 0.6), "tele_vy": (0.05, 0.3), "tele_om": (0.1, 0.8)}
 
     def __init__(self, robot, log=print, hb_ok=lambda: True, is_sim=False):
@@ -1460,7 +1624,7 @@ class WalkController:
                 v = str(v) if str(v) in ("both", "forward", "side", "back", "step") else "both"
             elif k == "step_dir":
                 v = str(v) if str(v) in ("left", "right", "back", "fwd") else "left"
-            elif k in ("dry_run", "avoid", "align_wall", "wall_track", "gait_cont"):
+            elif k in ("dry_run", "avoid", "align_wall", "wall_track", "gait_cont", "yaw_autocal"):
                 v = bool(v) if not isinstance(v, str) else (v.lower() in ("1", "true", "on", "yes"))
             else:
                 try:
@@ -1534,7 +1698,8 @@ class WalkController:
         """前進したときに、景色の流れ(LiDAR)とオドメトリの移動方向を比べて LiDAR のヨーを直す。
         センサ座標の点群だけ。静止中の点群を覚えておき、0.25m 以上動いたら比べる。
         向きが 4 度以上変わったら比べない(平行移動だけを見る)。20 秒に 1 回まで"""
-        if od is None or self.det.is_world_frame(frame) or self.det.floor is None:
+        if (not self.params.get("yaw_autocal", False) or od is None
+                or self.det.is_world_frame(frame) or self.det.floor is None):
             self._cal = None
             return
         fwd, lat, z = self.det.to_body(pts, frame, None, None)
@@ -1776,6 +1941,8 @@ class WalkController:
             "wall_dist": obs.get("wall_dist"), "wall_ang": obs.get("wall_ang"), "wall_len": obs.get("wall_len"),
             "dirs": obs.get("dirs"),
             "yaw_fix_deg": float(self.params.get("yaw_fix_deg", 0.0)),
+            "k_vx": (round(a.cal.k["x"], 2) if a is not None else None),
+            "k_vy": (round(a.cal.k["y"], 2) if a is not None else None),
             "lidar_age_ms": (None if t is None else round((now - t) * 1000)),
             "lidar_n": (self.lidar.n_recv if self.lidar is not None else 0),
             "lidar_src": getattr(self.lidar, "source", "-"),
