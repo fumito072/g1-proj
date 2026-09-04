@@ -112,7 +112,7 @@ WALK_FSMS = {200, 500, 501}        # 速度指令を受ける内蔵FSM(loco)。8
 YAW_KP = 1.6                       # 直進保持のゲイン[(rad/s)/rad](旧コックピット実績値)
 YAW_OM_MAX = 0.30                  # 直進保持の補正上限[rad/s]
 LAT_KP = 0.6                       # 経路線への横ずれ補正[(m/s)/m]
-LAT_VY_MAX = 0.08                  # 同・上限[m/s]
+LAT_VY_MAX = 0.05                  # 同・上限[m/s](望む実速度。較正後の指令は 0.25 程度)
 ACC_UP = 0.50                      # 加速の上限[m/s²](0.5m/s まで 1 秒)
 ACC_DOWN = 0.80                    # 急な減速の上限[m/s²](プロファイル自体は a_dec で滑らか)
 SEND_HZ = 10.0                     # 速度送信の周期
@@ -930,8 +930,14 @@ class AutoWalk:
         return od, obs
 
     def _om(self):
+        """向きの保持。内蔵歩行は小さな回転指令に応じないので、3 度を超えるずれには最低 0.15 rad/s を出し、
+        3 度以内は 0(小刻みに回し続けない)"""
         yaw = self.io["yaw"]()
-        return float(np.clip(-YAW_KP * _wrap(yaw - self._yaw_ref), -YAW_OM_MAX, YAW_OM_MAX))
+        err = _wrap(yaw - self._yaw_ref)
+        if abs(err) <= math.radians(3.0):
+            return 0.0
+        om = float(np.clip(-YAW_KP * err, -YAW_OM_MAX, YAW_OM_MAX))
+        return math.copysign(max(0.15, abs(om)), om)
 
     def _rec(self, **kw):
         kw["t"] = round(time.time() - self.t_start, 3)
@@ -1166,61 +1172,45 @@ class AutoWalk:
             self._rec(v=round(vcmd, 3), c=round(c, 3), x=round(float(x), 3), rem=round(float(rem), 3))
 
     def _final_approach(self, axis, target, label):
-        """最後の一歩: 残り距離を較正モデルで指令時間に換算し、短く歩いて止め、測って繰り返す(最大 4 回)。
-        小さな指令を出し続ける(足踏みで居座る)代わりに、自然に歩いて自然に止まる。
-        axis='s'(前後) / 'e'(横)。target はその軸の目標。到達判定は 5cm"""
+        """最後の寄せ(目標まで final_zone 以内): 一定のゆっくりした実速度で歩き続け、残りが 5cm 以下になった
+        瞬間に**一度だけ**止める。行き過ぎても戻さない(ピタッと止まる。操作者の指示)。
+        ★以前の「短い指令→止めて測る」の繰り返しは、指令の出し止めのたびに機体が後ろへ揺り戻り
+          (実機 14:27〜14:28: 1 回で −4〜−16cm)、目的の距離の後で少しずつ後ろへ戻って見えた。
+        axis='s'(経路に沿って) / 'e'(横)。target はその軸の値(経路座標)。"""
         cax = "y" if axis == "e" else "x"
-        cmd_mag = 0.40 if cax == "x" else 0.35
-        tol = 0.05
-        # まず止まって静定(歩いている途中から短い指令を足すと、惰性ぶんが上乗せされて行き過ぎる)
-        self._hold(0.7, f"{label}: 止まって残りを測る")
-        for i in range(4):
+        v_slow = 0.10                                    # 望む実速度[m/s](歩き続けられる最低ライン)
+        tol = 0.08                                       # 多少のずれは許容し、少し手前で一度だけ止める(操作者の指示)
+        od, obs = self._sense()
+        s, e = self._pose(od)
+        x0 = s if axis == "s" else e
+        sgn = 1.0 if target >= x0 else -1.0
+        t0 = time.time()
+        t_limit = 6.0 + abs(target - x0) / 0.05
+        while True:
+            time.sleep(0.1)
             od, obs = self._sense()
             s, e = self._pose(od)
             x = s if axis == "s" else e
-            rem = target - x
-            if abs(rem) <= tol:
-                self.msg = f"{label}: 到達(残り{rem * 100:+.0f}cm)"
-                return True
-            sgn = 1.0 if rem > 0 else -1.0
-            per_s = self.cal.k[cax] * max(0.0, cmd_mag - self.cal.dead)     # 指令中の実速度[m/s]
-            t_on = 0.25 + abs(rem) / max(0.05, per_s)                          # 歩き出し 0.25 秒 + 距離/速度
-            t_on = max(0.35, min(1.5, t_on))
-            c = sgn * cmd_mag
-            t1 = time.time()
-            xa = x
-            while time.time() - t1 < t_on:
-                time.sleep(0.1)
-                od, obs = self._sense()
-                s, e = self._pose(od)
-                if axis == "e":
-                    self.io["vel"](0.0, c, self._om())
-                else:
-                    self.io["vel"](c, self.cal.to_cmd(float(np.clip(-LAT_KP * e, -LAT_VY_MAX, LAT_VY_MAX)), "y"),
-                                   self._om())
-                self.msg = f"{label}: 最後の一歩 {i + 1}回目 指令{c:+.2f}×{t_on:.1f}s 残り{rem * 100:+.0f}cm"
-                self._rec(final=i + 1, c=round(c, 3), t_on=round(t_on, 2), x=round(float(s if axis == 's' else e), 3))
-            self._hold(0.8, f"{label}: 止まって測る")
-            od, obs = self._sense()
-            s, e = self._pose(od)
-            x = s if axis == "s" else e
-            moved = (x - xa) * sgn
-            # 実測で較正を更新(移動量/(指令−不感帯)/(時間−歩き出し))
-            if moved > 0.01 and t_on > 0.3:
-                k_obs = moved / max(0.05, cmd_mag - self.cal.dead) / max(0.1, t_on - 0.25)
-                if 0.1 <= k_obs <= 1.6:
-                    self.cal.k[cax] = min(1.5, max(0.15, 0.7 * self.cal.k[cax] + 0.3 * k_obs))
-            self.io["log"](f"{label}: 最後の一歩 {i + 1}回目 {moved * 100:+.1f}cm(指令{c:+.2f}×{t_on:.1f}s) 残り{(target - x) * 100:+.1f}cm")
+            rem = (target - x) * sgn
             self.offset = e
             if axis == "s":
                 self.traveled = getattr(self, "traveled_base", 0.0) + s
-        od, obs = self._sense()
-        s, e = self._pose(od)
-        self.offset = e
-        if axis == "s":
-            self.traveled = getattr(self, "traveled_base", 0.0) + s
-        x = s if axis == "s" else e
-        return abs(target - x) <= tol * 2
+            if rem <= tol:
+                self.io["vel"](0.0, 0.0, 0.0)
+                self._hold(1.0, f"{label}: 停止(残り{rem * 100:+.0f}cm)")
+                self.msg = f"{label}: 到達(残り{rem * 100:+.0f}cm)"
+                return True
+            if time.time() - t0 > t_limit:
+                self.io["vel"](0.0, 0.0, 0.0)
+                raise _Abort(f"中止({self.phase}): 最後の寄せの時間切れ({t_limit:.0f}秒、残り{rem * 100:+.0f}cm)")
+            c = sgn * abs(self.cal.to_cmd(v_slow, cax))
+            # 最後の寄せでは向き・横ずれの補正はしない(止まる直前に別の動きを足すと揺れる)
+            if axis == "e":
+                self.io["vel"](0.0, c, 0.0)
+            else:
+                self.io["vel"](c, 0.0, 0.0)
+            self.msg = f"{label}: 最後の寄せ 指令{c:+.2f} 残り{rem * 100:+.0f}cm"
+            self._rec(final=1, c=round(c, 3), x=round(float(x), 3), rem=round(float(rem), 3))
 
     def _lateral_to(self, e_target, label):
         """経路線からのずれ e を e_target へ。10cm 以上は普通の歩行、未満は小刻みステップ。
@@ -1340,6 +1330,22 @@ class AutoWalk:
         self.io["log"](f"正対しました(回転 {turned:+.1f}°、壁の角度 {ang if ang is None else round(ang, 1)}°)")
         return turned
 
+    def _log_post_stop(self):
+        """停止後 3 秒の位置の変化を記録する(止めた後に後ろへ戻るか、の診断)"""
+        try:
+            od, _obs = self._sense()
+            s0, e0 = self._pose(od)
+            for _ in range(30):
+                time.sleep(0.1)
+                self.io["vel"](0.0, 0.0, 0.0)
+            od, _obs = self._sense()
+            s1, e1 = self._pose(od)
+            self.io["log"](f"停止後 3 秒の位置変化: 前後 {(s1 - s0) * 100:+.1f}cm 横 {(e1 - e0) * 100:+.1f}cm")
+        except _Abort:
+            pass
+        except Exception:                          # noqa: BLE001
+            pass
+
     def _forward(self):
         """壁の手前(stop_dist)で止まるか、最大前進距離で止まるまで進む。
         - 速度は残り距離の連続プロファイル(speed_profile)
@@ -1428,7 +1434,7 @@ class AutoWalk:
             #     (小さな指令を出し続けると足踏みのまま居座る: 14:09 の実機)
             if (veer is None and d_stop is not None and d_stop <= float(p.get("final_zone", 0.25))
                     and self.v <= 0.3):
-                self._final_approach("s", self.traveled + d_stop, "壁の手前")
+                self._final_approach("s", s + d_stop, "壁の手前")     # ★経路座標 s(進み traveled ではない)
                 self.io["vel"](0.0, 0.0, 0.0)
                 self.v = 0.0
                 what = "壁" if (ah and ah["wall"]) or wall_d is not None else "障害物"
@@ -1464,7 +1470,7 @@ class AutoWalk:
                 else:
                     vy_t = 0.0
             else:
-                vy_t = float(np.clip(-LAT_KP * e, -LAT_VY_MAX, LAT_VY_MAX)) if self.v > 0.05 else 0.0
+                vy_t = float(np.clip(-LAT_KP * e, -LAT_VY_MAX, LAT_VY_MAX)) if (self.v > 0.05 and abs(e) > 0.06) else 0.0
             if vy_t > vy_now:
                 vy_now = min(vy_t, vy_now + ACC_UP * dt)
             else:
@@ -1532,6 +1538,7 @@ class AutoWalk:
                 od, obs = self._sense()
                 self._set_path(od)                  # 正対した向きで経路(直進の基準)を張り直す
         how = self._forward()
+        self._log_post_stop()
         if how == "max":
             self.result = (f"完了(壁なし): 最大前進距離{p['max_fwd']:.1f}mに到達"
                            f"{'。横移動はしません' if mode == 'both' else ''}")

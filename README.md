@@ -33,6 +33,7 @@ Unitree G1(29DoF)に強化学習の方策で椅子へ座らせるシステム。
 | 速度プロファイルと正対(9/4 午後) | `real/autowalk.py`(`speed_profile`, `_move_axis`, `_align_to_wall`)、かんたん画面 | 段階式→距離に応じた連続減速(√(2ad)、応答遅れ込み)、巡航 0.5 m/s と「速さ」選択。横歩き・後退は普通の歩行(10 cm 以下だけ小刻み)。斜めの壁には正対してから前進。docs/自動歩行 §6b-6 |
 | 斜めの回り込み・壁追従・最新 SDK の歩き方(9/4 夕) | `real/autowalk.py`(`_forward`, `_track_wall_heading`)、`real_robot.py`(`set_speed_mode`) | 歩きながら斜めに寄せてギリギリ(余白 8 cm)で回り込み、歩きながら戻る。壁の角度を毎コマ測って垂直を保つ。SetSpeedMode / ContinuousGait / duration 2 s。docs/自動歩行 §6b-7 |
 | 速度の較正と最後の一歩(9/4 夕) | `real/autowalk.py`(`VelCalib`, `_final_approach`)、`sim_robot.py` | 実機は指令の 4 割しか出ず(実速度≈0.4·(指令−0.1))、壁の前で足踏みのまま居座った。望む速度→指令の較正層(実測で更新・保存)、目標 25 cm 以内は短い歩きで寄せて止まる。ContinuousGait と LiDAR ヨー自動較正は既定 OFF。docs/自動歩行 §6b-8 |
+| 一度で止めて戻さない(9/4 夕) | `real/autowalk.py`(`_final_approach`) | 短い指令の出し止めで後ろへ揺り戻っていた(1 回 −4〜−16 cm)+目標座標の取り違え。最後 35 cm はゆっくり歩き続けて残り 8 cm で一度だけ止め、補正も戻しもしない。docs/自動歩行 §6b-9 |
 実機での検証順は 自動歩行 §6(A 距離表示 → B ドライラン → C 十字キー → D 短距離 → E 既定値)。
 
 ## 引き継ぐ人がまず読むもの(この順で)

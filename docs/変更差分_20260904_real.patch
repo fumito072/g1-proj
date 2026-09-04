@@ -10,8 +10,8 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +real/walk_calib.json
 diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png' -x '*.patch' -x walk_calib.json /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/README.md g1-proj-main/README.md
 --- /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/README.md	2026-09-03 18:26:29.000000000 +0900
-+++ g1-proj-main/README.md	2026-09-04 15:17:34.563472378 +0900
-@@ -7,10 +7,39 @@
++++ g1-proj-main/README.md	2026-09-04 15:36:38.165099965 +0900
+@@ -7,10 +7,40 @@
  
  ---
  
@@ -41,6 +41,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +| 速度プロファイルと正対(9/4 午後) | `real/autowalk.py`(`speed_profile`, `_move_axis`, `_align_to_wall`)、かんたん画面 | 段階式→距離に応じた連続減速(√(2ad)、応答遅れ込み)、巡航 0.5 m/s と「速さ」選択。横歩き・後退は普通の歩行(10 cm 以下だけ小刻み)。斜めの壁には正対してから前進。docs/自動歩行 §6b-6 |
 +| 斜めの回り込み・壁追従・最新 SDK の歩き方(9/4 夕) | `real/autowalk.py`(`_forward`, `_track_wall_heading`)、`real_robot.py`(`set_speed_mode`) | 歩きながら斜めに寄せてギリギリ(余白 8 cm)で回り込み、歩きながら戻る。壁の角度を毎コマ測って垂直を保つ。SetSpeedMode / ContinuousGait / duration 2 s。docs/自動歩行 §6b-7 |
 +| 速度の較正と最後の一歩(9/4 夕) | `real/autowalk.py`(`VelCalib`, `_final_approach`)、`sim_robot.py` | 実機は指令の 4 割しか出ず(実速度≈0.4·(指令−0.1))、壁の前で足踏みのまま居座った。望む速度→指令の較正層(実測で更新・保存)、目標 25 cm 以内は短い歩きで寄せて止まる。ContinuousGait と LiDAR ヨー自動較正は既定 OFF。docs/自動歩行 §6b-8 |
++| 一度で止めて戻さない(9/4 夕) | `real/autowalk.py`(`_final_approach`) | 短い指令の出し止めで後ろへ揺り戻っていた(1 回 −4〜−16 cm)+目標座標の取り違え。最後 35 cm はゆっくり歩き続けて残り 8 cm で一度だけ止め、補正も戻しもしない。docs/自動歩行 §6b-9 |
 +実機での検証順は 自動歩行 §6(A 距離表示 → B ドライラン → C 十字キー → D 短距離 → E 既定値)。
 +
  ## 引き継ぐ人がまず読むもの(この順で)
@@ -843,8 +844,8 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +  まま(先方のサービス。disable しない)。
 diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png' -x '*.patch' -x walk_calib.json "/tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/docs/\350\207\252\345\213\225\346\255\251\350\241\214_\351\232\234\345\256\263\347\211\251\345\201\234\346\255\242_\346\250\252\347\247\273\345\213\225.md" "g1-proj-main/docs/\350\207\252\345\213\225\346\255\251\350\241\214_\351\232\234\345\256\263\347\211\251\345\201\234\346\255\242_\346\250\252\347\247\273\345\213\225.md"
 --- "/tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/docs/\350\207\252\345\213\225\346\255\251\350\241\214_\351\232\234\345\256\263\347\211\251\345\201\234\346\255\242_\346\250\252\347\247\273\345\213\225.md"	1970-01-01 09:00:00.000000000 +0900
-+++ "g1-proj-main/docs/\350\207\252\345\213\225\346\255\251\350\241\214_\351\232\234\345\256\263\347\211\251\345\201\234\346\255\242_\346\250\252\347\247\273\345\213\225.md"	2026-09-04 15:17:34.562472398 +0900
-@@ -0,0 +1,339 @@
++++ "g1-proj-main/docs/\350\207\252\345\213\225\346\255\251\350\241\214_\351\232\234\345\256\263\347\211\251\345\201\234\346\255\242_\346\250\252\347\247\273\345\213\225.md"	2026-09-04 15:36:38.165099965 +0900
+@@ -0,0 +1,357 @@
 +# 自動歩行 — 前進(壁の手前で自然に停止・障害物は回り込み) / 横歩き(足踏み)(2026-09-04)
 +
 +実装: `real/autowalk.py`(本体)、`real/cockpit.py`(UI と配線)、
@@ -1155,6 +1156,24 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +シムモックにも同じ非線形(実速度 = 0.4·(指令 − 0.1))を入れ、机上試験を通した。
 +歩幅・歩数そのものは内蔵制御が速度指令から決める(SDK に直接の API は無い)。`SetSpeedMode`(−1/0/1/2)で
 +歩容の速さの段が変わる可能性があるので、実機で 1 を試す価値がある(`walk_param` {"speed_mode":1})。
++
++
++### 6b-9. 「目的の距離の後で少しずつ後ろへ戻る」→ 一度で止めて戻さない(2026-09-04 夕)
++
++14:27〜14:28 の走行ログ(`walk_20260904_1427*/1428*.jsonl`)で分かったこと:
++1. 最後の一歩の目標を「進み(traveled)」で渡し、比較は「経路座標 s」でしていた(向きを追従して経路を張り直すと
++   両者がずれる)。残り +241 cm と誤認して壁へ 4 回押し込み、停止距離 0.60 のところ 0.45〜0.50 m まで近づいた。
++2. 短い指令(0.40×1.5 s)の出し止めのたびに、機体は**後ろへ揺り戻ってから歩き出す**(1 回で −4〜−16 cm)。
++   これを 4 回繰り返すので「目的の距離に着いた後、少しずつ後ろへ戻る」ように見えた。
++
++作り直し(`_final_approach`):
++- 目標まで 35 cm 以内は**一定のゆっくりした実速度(0.10 m/s、指令は較正で 0.3 前後)で歩き続け**、残りが
++  8 cm 以下になった瞬間に**一度だけ止める**(1 秒静止)。行き過ぎても戻さない。向き・横ずれの補正もしない。
++- 目標は経路座標 s で渡す。停止後 3 秒の位置変化をログに出す(「停止後 3 秒の位置変化: 前後 x cm 横 y cm」)。
++- 向きの保持 `_om` は 3 度以内なら 0、超えたら最低 0.15 rad/s(内蔵歩行は小さな回転指令に応じない)。
++- 横ずれ保持の望む速度の上限を 0.05 に(較正後の指令 0.33 で横へ強く踏み出していた)。
++
++机上試験: 停止後 3 秒の位置変化 +0.3〜+1.0 cm(戻らない)。停止位置は停止距離 +0〜8 cm 手前(許容)。
 +
 +## 7. 既知の限界
 +
@@ -1488,8 +1507,8 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
  タブを前面に保つこと**。ブラウザはバックグラウンドのタブでタイマーを
 diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png' -x '*.patch' -x walk_calib.json /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/autowalk.py g1-proj-main/real/autowalk.py
 --- /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/autowalk.py	1970-01-01 09:00:00.000000000 +0900
-+++ g1-proj-main/real/autowalk.py	2026-09-04 15:23:12.242667362 +0900
-@@ -0,0 +1,1966 @@
++++ g1-proj-main/real/autowalk.py	2026-09-04 15:34:33.023642775 +0900
+@@ -0,0 +1,1973 @@
 +#!/usr/bin/env python3
 +"""自動歩行(前進 → 壁の手前で自然に停止 / 障害物は回り込んで元の経路へ / 横歩きは
 +細かい足踏み)と、スマホからの手動操作(押している間だけ動く)のための速度送信。
@@ -1604,7 +1623,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +YAW_KP = 1.6                       # 直進保持のゲイン[(rad/s)/rad](旧コックピット実績値)
 +YAW_OM_MAX = 0.30                  # 直進保持の補正上限[rad/s]
 +LAT_KP = 0.6                       # 経路線への横ずれ補正[(m/s)/m]
-+LAT_VY_MAX = 0.08                  # 同・上限[m/s]
++LAT_VY_MAX = 0.05                  # 同・上限[m/s](望む実速度。較正後の指令は 0.25 程度)
 +ACC_UP = 0.50                      # 加速の上限[m/s²](0.5m/s まで 1 秒)
 +ACC_DOWN = 0.80                    # 急な減速の上限[m/s²](プロファイル自体は a_dec で滑らか)
 +SEND_HZ = 10.0                     # 速度送信の周期
@@ -2422,8 +2441,14 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +        return od, obs
 +
 +    def _om(self):
++        """向きの保持。内蔵歩行は小さな回転指令に応じないので、3 度を超えるずれには最低 0.15 rad/s を出し、
++        3 度以内は 0(小刻みに回し続けない)"""
 +        yaw = self.io["yaw"]()
-+        return float(np.clip(-YAW_KP * _wrap(yaw - self._yaw_ref), -YAW_OM_MAX, YAW_OM_MAX))
++        err = _wrap(yaw - self._yaw_ref)
++        if abs(err) <= math.radians(3.0):
++            return 0.0
++        om = float(np.clip(-YAW_KP * err, -YAW_OM_MAX, YAW_OM_MAX))
++        return math.copysign(max(0.15, abs(om)), om)
 +
 +    def _rec(self, **kw):
 +        kw["t"] = round(time.time() - self.t_start, 3)
@@ -2658,61 +2683,45 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +            self._rec(v=round(vcmd, 3), c=round(c, 3), x=round(float(x), 3), rem=round(float(rem), 3))
 +
 +    def _final_approach(self, axis, target, label):
-+        """最後の一歩: 残り距離を較正モデルで指令時間に換算し、短く歩いて止め、測って繰り返す(最大 4 回)。
-+        小さな指令を出し続ける(足踏みで居座る)代わりに、自然に歩いて自然に止まる。
-+        axis='s'(前後) / 'e'(横)。target はその軸の目標。到達判定は 5cm"""
++        """最後の寄せ(目標まで final_zone 以内): 一定のゆっくりした実速度で歩き続け、残りが 5cm 以下になった
++        瞬間に**一度だけ**止める。行き過ぎても戻さない(ピタッと止まる。操作者の指示)。
++        ★以前の「短い指令→止めて測る」の繰り返しは、指令の出し止めのたびに機体が後ろへ揺り戻り
++          (実機 14:27〜14:28: 1 回で −4〜−16cm)、目的の距離の後で少しずつ後ろへ戻って見えた。
++        axis='s'(経路に沿って) / 'e'(横)。target はその軸の値(経路座標)。"""
 +        cax = "y" if axis == "e" else "x"
-+        cmd_mag = 0.40 if cax == "x" else 0.35
-+        tol = 0.05
-+        # まず止まって静定(歩いている途中から短い指令を足すと、惰性ぶんが上乗せされて行き過ぎる)
-+        self._hold(0.7, f"{label}: 止まって残りを測る")
-+        for i in range(4):
++        v_slow = 0.10                                    # 望む実速度[m/s](歩き続けられる最低ライン)
++        tol = 0.08                                       # 多少のずれは許容し、少し手前で一度だけ止める(操作者の指示)
++        od, obs = self._sense()
++        s, e = self._pose(od)
++        x0 = s if axis == "s" else e
++        sgn = 1.0 if target >= x0 else -1.0
++        t0 = time.time()
++        t_limit = 6.0 + abs(target - x0) / 0.05
++        while True:
++            time.sleep(0.1)
 +            od, obs = self._sense()
 +            s, e = self._pose(od)
 +            x = s if axis == "s" else e
-+            rem = target - x
-+            if abs(rem) <= tol:
-+                self.msg = f"{label}: 到達(残り{rem * 100:+.0f}cm)"
-+                return True
-+            sgn = 1.0 if rem > 0 else -1.0
-+            per_s = self.cal.k[cax] * max(0.0, cmd_mag - self.cal.dead)     # 指令中の実速度[m/s]
-+            t_on = 0.25 + abs(rem) / max(0.05, per_s)                          # 歩き出し 0.25 秒 + 距離/速度
-+            t_on = max(0.35, min(1.5, t_on))
-+            c = sgn * cmd_mag
-+            t1 = time.time()
-+            xa = x
-+            while time.time() - t1 < t_on:
-+                time.sleep(0.1)
-+                od, obs = self._sense()
-+                s, e = self._pose(od)
-+                if axis == "e":
-+                    self.io["vel"](0.0, c, self._om())
-+                else:
-+                    self.io["vel"](c, self.cal.to_cmd(float(np.clip(-LAT_KP * e, -LAT_VY_MAX, LAT_VY_MAX)), "y"),
-+                                   self._om())
-+                self.msg = f"{label}: 最後の一歩 {i + 1}回目 指令{c:+.2f}×{t_on:.1f}s 残り{rem * 100:+.0f}cm"
-+                self._rec(final=i + 1, c=round(c, 3), t_on=round(t_on, 2), x=round(float(s if axis == 's' else e), 3))
-+            self._hold(0.8, f"{label}: 止まって測る")
-+            od, obs = self._sense()
-+            s, e = self._pose(od)
-+            x = s if axis == "s" else e
-+            moved = (x - xa) * sgn
-+            # 実測で較正を更新(移動量/(指令−不感帯)/(時間−歩き出し))
-+            if moved > 0.01 and t_on > 0.3:
-+                k_obs = moved / max(0.05, cmd_mag - self.cal.dead) / max(0.1, t_on - 0.25)
-+                if 0.1 <= k_obs <= 1.6:
-+                    self.cal.k[cax] = min(1.5, max(0.15, 0.7 * self.cal.k[cax] + 0.3 * k_obs))
-+            self.io["log"](f"{label}: 最後の一歩 {i + 1}回目 {moved * 100:+.1f}cm(指令{c:+.2f}×{t_on:.1f}s) 残り{(target - x) * 100:+.1f}cm")
++            rem = (target - x) * sgn
 +            self.offset = e
 +            if axis == "s":
 +                self.traveled = getattr(self, "traveled_base", 0.0) + s
-+        od, obs = self._sense()
-+        s, e = self._pose(od)
-+        self.offset = e
-+        if axis == "s":
-+            self.traveled = getattr(self, "traveled_base", 0.0) + s
-+        x = s if axis == "s" else e
-+        return abs(target - x) <= tol * 2
++            if rem <= tol:
++                self.io["vel"](0.0, 0.0, 0.0)
++                self._hold(1.0, f"{label}: 停止(残り{rem * 100:+.0f}cm)")
++                self.msg = f"{label}: 到達(残り{rem * 100:+.0f}cm)"
++                return True
++            if time.time() - t0 > t_limit:
++                self.io["vel"](0.0, 0.0, 0.0)
++                raise _Abort(f"中止({self.phase}): 最後の寄せの時間切れ({t_limit:.0f}秒、残り{rem * 100:+.0f}cm)")
++            c = sgn * abs(self.cal.to_cmd(v_slow, cax))
++            # 最後の寄せでは向き・横ずれの補正はしない(止まる直前に別の動きを足すと揺れる)
++            if axis == "e":
++                self.io["vel"](0.0, c, 0.0)
++            else:
++                self.io["vel"](c, 0.0, 0.0)
++            self.msg = f"{label}: 最後の寄せ 指令{c:+.2f} 残り{rem * 100:+.0f}cm"
++            self._rec(final=1, c=round(c, 3), x=round(float(x), 3), rem=round(float(rem), 3))
 +
 +    def _lateral_to(self, e_target, label):
 +        """経路線からのずれ e を e_target へ。10cm 以上は普通の歩行、未満は小刻みステップ。
@@ -2832,6 +2841,22 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +        self.io["log"](f"正対しました(回転 {turned:+.1f}°、壁の角度 {ang if ang is None else round(ang, 1)}°)")
 +        return turned
 +
++    def _log_post_stop(self):
++        """停止後 3 秒の位置の変化を記録する(止めた後に後ろへ戻るか、の診断)"""
++        try:
++            od, _obs = self._sense()
++            s0, e0 = self._pose(od)
++            for _ in range(30):
++                time.sleep(0.1)
++                self.io["vel"](0.0, 0.0, 0.0)
++            od, _obs = self._sense()
++            s1, e1 = self._pose(od)
++            self.io["log"](f"停止後 3 秒の位置変化: 前後 {(s1 - s0) * 100:+.1f}cm 横 {(e1 - e0) * 100:+.1f}cm")
++        except _Abort:
++            pass
++        except Exception:                          # noqa: BLE001
++            pass
++
 +    def _forward(self):
 +        """壁の手前(stop_dist)で止まるか、最大前進距離で止まるまで進む。
 +        - 速度は残り距離の連続プロファイル(speed_profile)
@@ -2920,7 +2945,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +            #     (小さな指令を出し続けると足踏みのまま居座る: 14:09 の実機)
 +            if (veer is None and d_stop is not None and d_stop <= float(p.get("final_zone", 0.25))
 +                    and self.v <= 0.3):
-+                self._final_approach("s", self.traveled + d_stop, "壁の手前")
++                self._final_approach("s", s + d_stop, "壁の手前")     # ★経路座標 s(進み traveled ではない)
 +                self.io["vel"](0.0, 0.0, 0.0)
 +                self.v = 0.0
 +                what = "壁" if (ah and ah["wall"]) or wall_d is not None else "障害物"
@@ -2956,7 +2981,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +                else:
 +                    vy_t = 0.0
 +            else:
-+                vy_t = float(np.clip(-LAT_KP * e, -LAT_VY_MAX, LAT_VY_MAX)) if self.v > 0.05 else 0.0
++                vy_t = float(np.clip(-LAT_KP * e, -LAT_VY_MAX, LAT_VY_MAX)) if (self.v > 0.05 and abs(e) > 0.06) else 0.0
 +            if vy_t > vy_now:
 +                vy_now = min(vy_t, vy_now + ACC_UP * dt)
 +            else:
@@ -3024,6 +3049,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +                od, obs = self._sense()
 +                self._set_path(od)                  # 正対した向きで経路(直進の基準)を張り直す
 +        how = self._forward()
++        self._log_post_stop()
 +        if how == "max":
 +            self.result = (f"完了(壁なし): 最大前進距離{p['max_fwd']:.1f}mに到達"
 +                           f"{'。横移動はしません' if mode == 'both' else ''}")
