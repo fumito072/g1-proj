@@ -69,8 +69,8 @@ def test_detector():
     check(ah and not ah["wall"] and abs((ah["lat_hi"] - ah["lat_lo"]) - 0.6) < 0.15,
           f"幅0.6mの箱を障害物と判定(壁でない) 横幅 {None if not ah else round(ah['lat_hi'] - ah['lat_lo'], 2)}")
     check(ah and ah["free_l"] is not None and ah["free_r"] is not None
-          and abs(abs(ah["free_l"]) - 0.8) < 0.1,
-          f"回り込み先 左{ah.get('free_l')} / 右{ah.get('free_r')} (期待 ±0.80)")
+          and abs(abs(ah["free_l"]) - 0.63) < 0.1,
+          f"回り込み先 左{ah.get('free_l')} / 右{ah.get('free_r')} (期待 ±0.63)")
     check(r["side_free"] is None, f"横の空き {r['side_free']} (期待 None=空き)")
     # 壁(幅4m)
     pw = make_world_cloud(rng, (0.0, 0.0), 1.2, 0.0, box_w=4.0)
@@ -236,7 +236,7 @@ def test_detour():
     near = (xs > 1.8 - 0.15 - 0.25) & (xs < 1.8 + 0.15 + 0.25)
     if near.any():
         clearance = np.abs(ys[near]).min() - 0.3
-        check(clearance > 0.3, f"箱の横を通る間の最小クリアランス {clearance:.2f}m (期待>0.30=肩幅+余裕)")
+        check(0.05 < clearance < 0.35, f"箱の横をギリギリで通る: 最小クリアランス {clearance:.2f}m (期待 0.05〜0.35 = 体の半幅0.25+余白0.08)")
     wc.close()
 
 

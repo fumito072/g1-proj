@@ -1,7 +1,7 @@
 diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png' -x '*.patch' /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/README.md g1-proj-main/README.md
 --- /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/README.md	2026-09-03 18:26:29.000000000 +0900
-+++ g1-proj-main/README.md	2026-09-04 14:48:55.010590189 +0900
-@@ -7,10 +7,37 @@
++++ g1-proj-main/README.md	2026-09-04 15:02:08.534779991 +0900
+@@ -7,10 +7,38 @@
  
  ---
  
@@ -29,6 +29,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +| LiDAR の壁距離の作り直し(9/4 午後) | `real/lidar_bridge.py`、`real/autowalk.py`、かんたん画面 | 前方を生座標 +X 固定に(床が見える向きは後ろを向いていた)、つま先基準、壁の面を直線フィット、前後左右の最近距離、[前後を反転]、前進時の自動ヨー較正。docs/自動歩行 §6b-4 |
 +| 歩行が始まらない原因と修正(9/4 午後) | `real/real_robot.py`(`ensure_walk_mode`)、`sim_robot.py`、UI 表記 | 802 では SetVelocity が効かない(0.35 m/s×4 秒で 4 cm)。最新 SDK の Start()=SetFsmId(500) に合わせ、歩行は loco 500/501 で行い、802 は着座の UserCtrl 入口だけに。docs/自動歩行 §6b-5。実機未検証 |
 +| 速度プロファイルと正対(9/4 午後) | `real/autowalk.py`(`speed_profile`, `_move_axis`, `_align_to_wall`)、かんたん画面 | 段階式→距離に応じた連続減速(√(2ad)、応答遅れ込み)、巡航 0.5 m/s と「速さ」選択。横歩き・後退は普通の歩行(10 cm 以下だけ小刻み)。斜めの壁には正対してから前進。docs/自動歩行 §6b-6 |
++| 斜めの回り込み・壁追従・最新 SDK の歩き方(9/4 夕) | `real/autowalk.py`(`_forward`, `_track_wall_heading`)、`real_robot.py`(`set_speed_mode`) | 歩きながら斜めに寄せてギリギリ(余白 8 cm)で回り込み、歩きながら戻る。壁の角度を毎コマ測って垂直を保つ。SetSpeedMode / ContinuousGait / duration 2 s。docs/自動歩行 §6b-7 |
 +実機での検証順は 自動歩行 §6(A 距離表示 → B ドライラン → C 十字キー → D 短距離 → E 既定値)。
 +
  ## 引き継ぐ人がまず読むもの(この順で)
@@ -831,8 +832,8 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +  まま(先方のサービス。disable しない)。
 diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png' -x '*.patch' "/tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/docs/\350\207\252\345\213\225\346\255\251\350\241\214_\351\232\234\345\256\263\347\211\251\345\201\234\346\255\242_\346\250\252\347\247\273\345\213\225.md" "g1-proj-main/docs/\350\207\252\345\213\225\346\255\251\350\241\214_\351\232\234\345\256\263\347\211\251\345\201\234\346\255\242_\346\250\252\347\247\273\345\213\225.md"
 --- "/tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/docs/\350\207\252\345\213\225\346\255\251\350\241\214_\351\232\234\345\256\263\347\211\251\345\201\234\346\255\242_\346\250\252\347\247\273\345\213\225.md"	1970-01-01 09:00:00.000000000 +0900
-+++ "g1-proj-main/docs/\350\207\252\345\213\225\346\255\251\350\241\214_\351\232\234\345\256\263\347\211\251\345\201\234\346\255\242_\346\250\252\347\247\273\345\213\225.md"	2026-09-04 14:48:55.010590189 +0900
-@@ -0,0 +1,293 @@
++++ "g1-proj-main/docs/\350\207\252\345\213\225\346\255\251\350\241\214_\351\232\234\345\256\263\347\211\251\345\201\234\346\255\242_\346\250\252\347\247\273\345\213\225.md"	2026-09-04 15:02:08.534779991 +0900
+@@ -0,0 +1,307 @@
 +# 自動歩行 — 前進(壁の手前で自然に停止・障害物は回り込み) / 横歩き(足踏み)(2026-09-04)
 +
 +実装: `real/autowalk.py`(本体)、`real/cockpit.py`(UI と配線)、
@@ -1097,6 +1098,20 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +回り込み(横 0.8 m を普通の歩行で) OK。横 0.5 m → 0.508 m。斜め 20° の壁 → 回転 −21.8° して壁の手前 0.59 m で停止。
 +
 +速度の目安(v_max 0.5、a 0.25): 残り 0.6 m で 0.47、0.4 m で 0.35、0.3 m で 0.27、0.2 m で 0.16、0.1 m で 0.15(最低)、3 cm 以内で 0。
++
++
++### 6b-7. ギリギリで斜めに回り込む・壁との角度を保ち続ける・最新 SDK の歩き方(2026-09-04 夕)
++
++操作者の指示: 「障害物をもう少しギリギリで、斜めに歩きながらスマートに回り込む」「最初に垂直にしても角度が
++ずれていくので、常に壁との角度を測って垂直のまま進む」「歩き方も最新 SDK のものに」。
++
++| 項目 | 前 | 後 |
++|---|---|---|
++| 回り込み | 止まる→横へ(横歩き)→進む→戻る(横歩き)の 3 段。余白 0.15 m(体の中心は端から 0.50 m) | **歩きながら斜めに**: 障害物が 1.3 m 以内に来たら、前進(上限 `veer_v` 0.35 m/s)を続けたまま横速度で空いている側へ寄せる。**余白 0.08 m**(中心は端から 0.43 m、肩からの隙間 ≈ 0.13 m)。通り過ぎたら歩きながら元の経路線へ戻す。脇を通る物体では止めない(壁までの距離で減速。0.35 m 未満に何かあれば止める) |
++| 壁との角度 | 前進の前にその場で正対するだけ | **`_track_wall_heading`**: 毎コマ壁の面の角度を測り、目標の向き(IMU 基準)を壁の法線へローパス 0.3 で寄せ続ける。5 度以上変わったら経路線も張り直す(進みは引き継ぐ)。その場回転は角度 8 度超のときだけ |
++| 歩き方 | SetVelocity(duration 0.5 s)を 10 Hz | 最新 SDK の例(Start→StandUp→**SetSpeedMode**→**ContinuousGait**→Move)に合わせた: 歩行モードに入るとき `SetSpeedMode(speed_mode)`(既定 0。SDK 例の値は −1/0/1/2)、自動歩行の間は **ContinuousGait(SetBalanceMode 1)** で足踏みを続けて歩き出し・止まりの段差を無くし、終わったら 0 へ。SetVelocity の duration は **2 s**(10 Hz で上書き。プロセスが死んでも 2 秒で止まる) |
++
++机上試験: 回り込みは箱の脇を最小クリアランス 0.05〜0.35 m で通り、経路線へ戻って壁の手前で停止。
 +
 +## 7. 既知の限界
 +
@@ -1430,8 +1445,8 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
  タブを前面に保つこと**。ブラウザはバックグラウンドのタブでタイマーを
 diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png' -x '*.patch' /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/autowalk.py g1-proj-main/real/autowalk.py
 --- /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/autowalk.py	1970-01-01 09:00:00.000000000 +0900
-+++ g1-proj-main/real/autowalk.py	2026-09-04 14:47:32.516855898 +0900
-@@ -0,0 +1,1730 @@
++++ g1-proj-main/real/autowalk.py	2026-09-04 15:05:19.773751091 +0900
+@@ -0,0 +1,1799 @@
 +#!/usr/bin/env python3
 +"""自動歩行(前進 → 壁の手前で自然に停止 / 障害物は回り込んで元の経路へ / 横歩きは
 +細かい足踏み)と、スマホからの手動操作(押している間だけ動く)のための速度送信。
@@ -1489,6 +1504,15 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +    align_wall=True,   # 前進の前に、正面の壁が斜めならその場で回転して正対する(2026-09-04 操作者の指示)
 +    align_tol_deg=3.0, # 正対したとみなす角度[deg]
 +    om_turn=0.30,      # 正対の回転速度の上限[rad/s]
++    align_inplace_deg=8.0,  # 壁の角度がこれを超えていたら前進の前にその場で回る。以下なら歩きながら合わせる
++    wall_track=True,   # 歩行中も壁の角度を測り続け、向きを壁に垂直へ寄せ続ける(2026-09-04 操作者の指示)
++    veer_v=0.35,       # 回り込み(斜め歩き)中の前進速度の上限[m/s]
++    # 最新 SDK(unitree_sdk2 例: Start→StandUp→SetSpeedMode→ContinuousGait→Move)の歩き方(2026-09-04 夕)
++    speed_mode=0,      # SetSpeedMode(7107): -1/0/1/2(SDK 例の取りうる値。0=標準)。歩行モードに入るときに送る
++    gait_cont=True,    # ContinuousGait(SetBalanceMode 1): 自動歩行中は速度ゼロでも足踏みを続け、歩き出し・止まりの
++                       #   段差を無くす。歩行が終わったら 0(静止立位)へ戻す
++    cmd_dur=2.0,       # SetVelocity の duration[s]。SDK の Move(continuous) は 864000 だが、自プロセスが死んでも
++                       #   2 秒で止まるように有限にする。送信は 10Hz で上書きし続ける
 +    stop_dist=0.60,    # 壁(障害物)のこの距離手前で止まる[m](骨盤基準)
 +    side_dist=0.50,    # 横歩きの距離[m]
 +    side_dir="left",   # 横歩きの向き "left"/"right"
@@ -1503,7 +1527,8 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +    front_offset=0.15, # センサ軸→つま先の前方距離[m]。距離は「つま先から」で出す
 +    avoid=True,        # 壁以外の障害物は回り込んで避ける
 +    wall_width=1.4,    # 前方の物体の横幅がこれ以上なら「壁」(回り込まない)[m]
-+    detour_margin=0.15,  # 回り込みで物体の端から取る余裕[m]
++    detour_margin=0.08, # 回り込みで障害物の端と体の側面との余白[m]。★ギリギリ(操作者の指示)
++    body_half=0.25,    # 体の半幅[m](肩 0.22 + 腕の振り)。回り込みの横位置 = 端 + body_half + detour_margin  # 回り込みで物体の端から取る余裕[m]
 +    detour_max=0.9,    # 回り込みの最大横オフセット[m](これ以上要るなら壁扱い)
 +    side_tol=0.02,     # 横移動の到達許容[m]
 +    pulse_on=0.5,      # 足踏みパルス: 動く時間[s]
@@ -1946,12 +1971,13 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +                    mb = (hm & (fwd > d0 - 0.5) & (fwd < d0 + depth + 0.8)
 +                          & (lat > e_lo) & (lat < e_hi))
 +                    return int(mb.sum()) < 6
-+                eL = hi + hw + mgn
-+                eR = lo - hw - mgn
++                bh = float(cfg.get("body_half", 0.25))       # 体の半幅(ギリギリを通る)
++                eL = hi + bh + mgn
++                eR = lo - bh - mgn
 +                free_l = eL if (not wall and eL <= cfg["detour_max"]
-+                                and free(hi + 0.03, eL + hw)) else None
++                                and free(hi + 0.03, eL + bh)) else None
 +                free_r = eR if (not wall and -eR <= cfg["detour_max"]
-+                                and free(eR - hw, lo - 0.03)) else None
++                                and free(eR - bh, lo - 0.03)) else None
 +                out["ahead"] = dict(lat_lo=round(lo, 3), lat_hi=round(hi, 3),
 +                                    depth=round(depth, 3), wall=bool(wall),
 +                                    free_l=(None if free_l is None else round(free_l, 3)),
@@ -2047,6 +2073,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +
 +    def __init__(self, send_fn, log=print):
 +        self._send = send_fn         # send_fn(vx, vy, om, duration) -> bool
++        self.duration = 2.0          # 指令の有効時間[s](cmd_dur)。10Hz で上書きし続ける
 +        self._log = log
 +        self._lock = threading.Lock()
 +        self._cmd = (0.0, 0.0, 0.0)
@@ -2091,7 +2118,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +            try:
 +                if need > 0:
 +                    if not dry:
-+                        ok = self._send(0.0, 0.0, 0.0, CMD_HOLD_S)
++                        ok = self._send(0.0, 0.0, 0.0, self.duration)
 +                        self.n_sent += 1
 +                        if not ok:
 +                            self.n_fail += 1
@@ -2101,7 +2128,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +                        self._need_stop = max(0, self._need_stop - 1)
 +                elif moving:
 +                    if not dry:
-+                        ok = self._send(cmd[0], cmd[1], cmd[2], CMD_HOLD_S)
++                        ok = self._send(cmd[0], cmd[1], cmd[2], self.duration)
 +                        self.n_sent += 1
 +                        if not ok:
 +                            self.n_fail += 1
@@ -2249,6 +2276,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +        self._fx, self._fy = math.cos(yaw_od), math.sin(yaw_od)
 +        self._lx, self._ly = -math.sin(yaw_od), math.cos(yaw_od)
 +        self._yaw_ref = self.io["yaw"]()
++        self._path_yaw_ref = self._yaw_ref
 +
 +    def _pose(self, od):
 +        dx, dy = od[1] - self._x0, od[2] - self._y0
@@ -2535,6 +2563,34 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +        return (f"1歩({ {'left': '左', 'right': '右', 'fwd': '前', 'back': '後ろ'}.get(direction, direction)}): "
 +                f"{(d or 0.0) * 100:+.1f}cm 動きました")
 +
++    def _rebase_path(self, od, yaw_ref_imu):
++        """経路線を「いまの位置・向き yaw_ref(IMU)」で張り直す。進み(traveled)は引き継ぐ。
++        壁に垂直な向きへ寄せ続けると最初の経路線からずれるので、向きが 5 度以上変わったら呼ぶ"""
++        s, _e = self._pose(od)
++        self.traveled_base = getattr(self, "traveled_base", 0.0) + s
++        yaw_od = od[3] + _wrap(yaw_ref_imu - self.io["yaw"]())    # 望む向きをオドメトリ座標で
++        self._x0, self._y0 = od[1], od[2]
++        self._fx, self._fy = math.cos(yaw_od), math.sin(yaw_od)
++        self._lx, self._ly = -math.sin(yaw_od), math.cos(yaw_od)
++        self._path_yaw_ref = yaw_ref_imu
++
++    def _track_wall_heading(self, obs, od):
++        """壁の面の角度 wall_ang(壁の法線が進行方向から左へ何度か)を毎コマ見て、目標の向き
++        _yaw_ref を壁に垂直へ寄せる(ローパス 0.3)。向きが 5 度以上変わったら経路線も張り直す。
++        壁が見えないときは前回の _yaw_ref をそのまま保持(IMU)"""
++        if not self.p.get("wall_track", True) or not obs.get("ok"):
++            return
++        ang = obs.get("wall_ang")
++        wl = obs.get("wall_len") or 0.0
++        wd = obs.get("wall_dist")
++        if ang is None or wl < 0.8 * float(self.p["wall_width"]) or wd is None or wd > 5.0:
++            return                                  # 壁幅の 8 割未満の面(箱・机)は追わない
++        yaw_now = self.io["yaw"]()
++        target = _wrap(yaw_now + math.radians(float(ang)))
++        self._yaw_ref = _wrap(self._yaw_ref + 0.3 * _wrap(target - self._yaw_ref))
++        if abs(_wrap(self._yaw_ref - getattr(self, "_path_yaw_ref", self._yaw_ref))) > math.radians(5.0):
++            self._rebase_path(od, self._yaw_ref)
++
 +    def _align_to_wall(self):
 +        """正面の壁が斜めなら、その場で回転して壁に正対する(壁の面フィットの角度 wall_ang を使う)。
 +        wall_ang = 壁の法線が進行方向から左へ何度ずれているか。正なら左へ回る。
@@ -2545,8 +2601,8 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +        self._hold(0.4, "正対: 壁の向きを読んでいます")     # 歩行モードに入った直後の新しい点群を待つ
 +        od, obs = self._sense()
 +        ang = obs.get("wall_ang") if obs.get("ok") else None
-+        if ang is None or abs(ang) <= tol:
-+            return 0.0
++        if ang is None or abs(ang) <= max(tol, float(p.get("align_inplace_deg", 8.0))):
++            return 0.0                                  # 小さなずれは歩きながら合わせる(_track_wall_heading)
 +        self.phase = "ALIGN"
 +        self.io["log"](f"正面の壁が {ang:+.1f}° 斜めです — その場で回転して正対します(壁 {obs.get('wall_dist')}m)")
 +        yaw0 = self.io["yaw"]()
@@ -2590,14 +2646,21 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +
 +    def _forward(self):
 +        """壁の手前(stop_dist)で止まるか、最大前進距離で止まるまで進む。
++        - 速度は残り距離の連続プロファイル(speed_profile)
++        - 壁の角度を毎コマ測り、向きを壁に垂直へ寄せ続ける(_track_wall_heading)
++        - 壁でない障害物は**歩きながら斜めに**空いている側へ寄せて脇を通り(余白 detour_margin)、
++          通り過ぎたら歩きながら元の経路線へ戻る(2026-09-04 操作者の指示: ギリギリ・スマートに)
 +        戻り値: "wall"(壁の手前で停止) / "max"(壁なしで最大距離)"""
 +        p = self.p
 +        self.phase = "FORWARD"
 +        self.v = 0.0
 +        hit = 0
++        veer = None                                 # 回り込みの状態 {e_t, s_end, stage}
++        vy_now = 0.0
 +        t_phase = time.time()
 +        t_prev = t_phase
 +        t_limit = p["max_fwd"] / max(p["v_fwd"], 0.05) * 2.5 + 20.0
++        v_min = float(p["v_creep"])
 +        while True:
 +            time.sleep(0.1)
 +            now = time.time()
@@ -2607,105 +2670,109 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +            if now - t_phase > t_limit:
 +                raise _Abort(f"中止(FORWARD): 時間切れ({t_limit:.0f}秒)")
 +            s, e = self._pose(od)
-+            self.traveled, self.offset = s, e
++            self.traveled, self.offset = getattr(self, "traveled_base", 0.0) + s, e
 +            if not obs.get("ok"):
-+                # 判定できない(床が取れない等)= 見えていない。安全側で止まって待つ
 +                self.io["vel"](0.0, 0.0, 0.0)
 +                self.v = 0.0
 +                self.msg = f"待機: 障害物の判定不能({obs.get('why')})"
 +                self._rec(vx=0, dist=None, s=round(s, 3))
 +                continue
++            self._track_wall_heading(obs, od)      # ★壁に垂直な向きを保ち続ける
 +            dist = obs.get("dist")
 +            ah = obs.get("ahead")
-+            # --- 回り込み: 壁でない物体が近づいたら、空いている側へ避けて元の経路へ戻る
-+            if (p.get("avoid", True) and dist is not None and ah is not None
++            # 「壁」として使うのは面の見えている幅が壁幅の 8 割以上の面だけ(箱の前面を壁と誤認しない)
++            wall_d = (obs.get("wall_dist") if (obs.get("wall_len") or 0.0) >= 0.8 * float(p["wall_width"])
++                      else None)
++            # --- 回り込みの開始: 壁でない物体が前に来たら、空いている側へ歩きながら寄せる
++            if (veer is None and p.get("avoid", True) and dist is not None and ah is not None
 +                    and not ah["wall"] and self.detours < MAX_DETOURS
-+                    and dist <= max(p["stop_dist"] + 0.5, 0.9)):
++                    and dist <= max(p["stop_dist"] + 0.9, 1.5)):
 +                cands = [c for c in (ah.get("free_l"), ah.get("free_r")) if c is not None]
 +                if cands:
 +                    e_t = min(cands, key=abs)
-+                    self.io["vel"](0.0, 0.0, 0.0)
-+                    self.v = 0.0
-+                    self.io["log"](f"障害物 {dist:.2f}m(横幅{ah['lat_hi'] - ah['lat_lo']:.2f}m"
-+                                   f"・奥行{ah['depth']:.2f}m) — "
-+                                   f"{'左' if e_t > 0 else '右'}へ{abs(e_t):.2f}m回り込みます")
-+                    self._detour(e_t, s + dist + ah["depth"])
-+                    hit = 0
-+                    t_prev = time.time()
-+                    continue
-+            d_rem = None if dist is None else dist - p["stop_dist"]
-+            near = d_rem is not None and d_rem <= 0.03
++                    veer = dict(e_t=e + e_t, s_end=s + dist + ah["depth"] + 0.25, stage="out",
++                                dir=(1.0 if e_t > 0 else -1.0))
++                    self.io["log"](f"障害物 {dist:.2f}m(横幅{ah['lat_hi'] - ah['lat_lo']:.2f}m・奥行{ah['depth']:.2f}m) — "
++                                   f"歩きながら{'左' if e_t > 0 else '右'}へ{abs(e_t):.2f}m寄せて脇を通ります")
++                    self.phase = "DETOUR_OUT"
++            # --- 停止判定: 回り込み中は壁までの距離だけを見る(脇を通る物体では止めない)。
++            #     ただし極端に近い物(0.35m 未満)は止める
++            if veer is not None:
++                d_stop = None if wall_d is None else wall_d - p["stop_dist"]
++                if dist is not None and dist < 0.35:
++                    d_stop = dist - 0.30
++            else:
++                d_stop = None if dist is None else dist - p["stop_dist"]
++            near = d_stop is not None and d_stop <= 0.03
 +            hit = hit + 1 if near else 0
 +            if hit >= 2:
 +                self.io["vel"](0.0, 0.0, 0.0)
 +                self.v = 0.0
-+                self.io["log"](f"{'壁' if (ah and ah['wall']) else '障害物'} {dist:.2f}m"
-+                               f"(停止距離{p['stop_dist']:.2f}m) — 停止します  前進{s:.2f}m")
++                what = "壁" if (ah and ah["wall"]) or (veer is not None and wall_d is not None) else "障害物"
++                self.io["log"](f"{what} {(wall_d if (veer is not None and wall_d is not None) else dist):.2f}m"
++                               f"(停止距離{p['stop_dist']:.2f}m) — 停止します  前進{self.traveled:.2f}m")
 +                return "wall"
-+            if s >= p["max_fwd"]:
++            if self.traveled >= p["max_fwd"]:
 +                self.io["vel"](0.0, 0.0, 0.0)
 +                self.v = 0.0
 +                return "max"
-+            # --- 距離に応じた連続プロファイル(壁の手前から sqrt(2·a·d) で滑らかに落ちる)+ 加減速の上限
-+            v_t = speed_profile(p["v_fwd"], d_rem, p["v_creep"], p.get("a_dec", 0.25), self.v, p.get("cmd_lag", 0.3))
++            # --- 前進速度: 連続プロファイル(回り込み中は veer_v 以下)
++            v_t = speed_profile(p["v_fwd"], d_stop, v_min, p.get("a_dec", 0.25), self.v, p.get("cmd_lag", 0.3))
++            if veer is not None:
++                # 脇へ寄せ切るまでは障害物へ近づくほど落とす(0.35m 手前を基準)。ただし最低 v_min は保つ
++                v_cap = speed_profile(float(p.get("veer_v", 0.35)), None if dist is None else dist - 0.35,
++                                      v_min, p.get("a_dec", 0.25), self.v, p.get("cmd_lag", 0.3))
++                v_t = min(v_t, max(v_cap, v_min))
++                v_t = max(v_t, v_min) if d_stop is None or d_stop > 0.03 else v_t
 +            if v_t > self.v:
 +                self.v = min(v_t, self.v + ACC_UP * dt)
 +            else:
 +                self.v = max(v_t, self.v - ACC_DOWN * dt)
-+            vy = float(np.clip(-LAT_KP * e, -LAT_VY_MAX, LAT_VY_MAX)) if self.v > 0.05 else 0.0
-+            om = self._om() if self.v > 0.03 else 0.0
-+            self.io["vel"](self.v, vy, om)
-+            self.msg = (f"前進 v={self.v:.2f} 横補正{vy:+.2f} 補正{om:+.2f} | 前方 "
-+                        f"{'---' if dist is None else f'{dist:.2f}m'}"
-+                        f"{'(壁)' if (ah and ah['wall']) else ''} | {s:.2f}m ずれ{e * 100:+.0f}cm")
-+            self._rec(vx=round(self.v, 3), vy=round(vy, 3), om=round(om, 3), dist=dist,
-+                      s=round(s, 3), e=round(e, 3), n=obs.get("n_obs"))
++            # --- 横速度: 回り込み中は目標の横位置へ(連続プロファイル)、それ以外は経路線を保つ
++            if veer is not None:
++                rem_e = veer["e_t"] - e
++                if veer["stage"] == "out":
++                    # 寄せている向き(固定)にだけ側方の物を見る。目標に届いた後の微調整では見ない
++                    sgn = veer["dir"]
++                    sf = obs.get("side_free_l" if sgn > 0 else "side_free_r")
++                    if abs(rem_e) > 0.04 and sf is not None and sf < p["side_clear"]:
++                        self.io["vel"](0.0, 0.0, 0.0)
++                        self.v = 0.0
++                        raise _Abort(f"中止(DETOUR_OUT): 回り込む側 {sf:.2f}m に障害物")
++                    if abs(rem_e) <= 0.04 and s >= veer["s_end"]:
++                        veer["stage"] = "back"
++                        veer["e_t"] = 0.0
++                        self.phase = "DETOUR_BACK"
++                        self.io["log"](f"障害物を通り過ぎました(進み{self.traveled:.2f}m) — 歩きながら元の経路へ戻ります")
++                else:
++                    if abs(rem_e) <= 0.04:
++                        veer = None
++                        self.detours += 1
++                        self.phase = "FORWARD"
++                        self.io["log"](f"元の経路へ戻りました(回り込み{self.detours}回目)")
++                if veer is not None:
++                    vy_t = math.copysign(speed_profile(float(p["v_side"]), abs(rem_e), 0.10, 0.2, abs(vy_now), 0.3, 0.04)
++                                         if abs(rem_e) > 0.04 else 0.0, rem_e)
++                else:
++                    vy_t = 0.0
++            else:
++                vy_t = float(np.clip(-LAT_KP * e, -LAT_VY_MAX, LAT_VY_MAX)) if self.v > 0.05 else 0.0
++            if vy_t > vy_now:
++                vy_now = min(vy_t, vy_now + ACC_UP * dt)
++            else:
++                vy_now = max(vy_t, vy_now - ACC_UP * dt)
++            om = self._om() if (self.v > 0.03 or abs(vy_now) > 0.03) else 0.0
++            self.io["vel"](self.v, vy_now, om)
++            wa = obs.get("wall_ang")
++            wa_s = "" if wa is None else f" 壁の角度{wa:+.0f}°"
++            d_s = "---" if dist is None else f"{dist:.2f}m"
++            self.msg = (f"{'回り込み' if veer is not None else '前進'} v={self.v:.2f} 横{vy_now:+.2f} 回転{om:+.2f} | 前方 "
++                        f"{d_s}{'(壁)' if (ah and ah['wall']) else ''}{wa_s}"
++                        f" | {self.traveled:.2f}m ずれ{e * 100:+.0f}cm")
++            self._rec(vx=round(self.v, 3), vy=round(vy_now, 3), om=round(om, 3), dist=dist,
++                      s=round(self.traveled, 3), e=round(e, 3), n=obs.get("n_obs"),
++                      wall_ang=obs.get("wall_ang"), veer=(None if veer is None else veer["stage"]))
 +
-+    def _detour(self, e_t, s_end):
-+        """障害物の横へ出て(DETOUR_OUT) → 奥まで進み(DETOUR_PASS) → 経路線へ戻る(DETOUR_BACK)"""
-+        p = self.p
-+        self.phase = "DETOUR_OUT"
-+        if not self._lateral_to(e_t, "回り込み(横へ)"):
-+            raise _Abort("中止(DETOUR_OUT): 回り込む側に障害物")
-+        self.phase = "DETOUR_PASS"
-+        s_goal = s_end + 0.6
-+        t0 = time.time()
-+        t_limit = (s_goal - self.traveled) / max(0.6 * p["v_fwd"], 0.05) * 3.0 + 15.0
-+        self.v = 0.0
-+        t_prev = time.time()
-+        while True:
-+            time.sleep(0.1)
-+            now = time.time()
-+            dt = max(0.02, min(0.3, now - t_prev))
-+            t_prev = now
-+            od, obs = self._sense()
-+            s, e = self._pose(od)
-+            self.traveled, self.offset = s, e
-+            if s >= s_goal:
-+                self.io["vel"](0.0, 0.0, 0.0)
-+                self.v = 0.0
-+                break
-+            if now - t0 > t_limit:
-+                raise _Abort("中止(DETOUR_PASS): 時間切れ")
-+            dist = obs.get("dist") if obs.get("ok") else None
-+            if dist is not None and dist <= p["stop_dist"] + 0.05:
-+                self.io["vel"](0.0, 0.0, 0.0)
-+                raise _Abort(f"中止(DETOUR_PASS): 回り込み先にも障害物 {dist:.2f}m")
-+            v_t = min(0.6 * p["v_fwd"], stage_speed(p["v_fwd"], None if dist is None
-+                                                    else dist - p["stop_dist"], p["v_creep"]))
-+            self.v = min(v_t, self.v + ACC_UP * dt) if v_t > self.v else max(v_t, self.v - ACC_DOWN * dt)
-+            vy = float(np.clip(-LAT_KP * (e - e_t), -LAT_VY_MAX, LAT_VY_MAX))
-+            self.io["vel"](self.v, vy, self._om())
-+            self.msg = f"回り込み(通過) v={self.v:.2f} | {s:.2f}/{s_goal:.2f}m ずれ{e * 100:+.0f}cm"
-+            self._rec(vx=round(self.v, 3), vy=round(vy, 3), s=round(s, 3), e=round(e, 3), dist=dist)
-+        self.phase = "DETOUR_BACK"
-+        if not self._lateral_to(0.0, "回り込み(経路へ戻る)"):
-+            raise _Abort("中止(DETOUR_BACK): 戻る側に障害物")
-+        self.detours += 1
-+        self.io["log"](f"回り込み完了({self.detours}回目) — 元の経路へ戻りました(ずれ{self.offset * 100:+.0f}cm)")
-+        self.phase = "FORWARD"
-+
-+    # ---- 全体
 +    def _main(self):
 +        p = self.p
 +        io = self.io
@@ -2715,6 +2782,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +        mode = p.get("mode", "both")
 +        od, obs = self._sense()
 +        self._set_path(od)
++        self.traveled_base = 0.0
 +        log(f"自動歩行 開始{'(ドライラン: 速度は送らない)' if dry else ''}"
 +            f"[{ {'both': '前進→横移動', 'forward': '前進のみ', 'side': '横移動のみ', 'back': '後退', 'step': '1歩'}.get(mode, mode)}]: "
 +            f"前進{p['v_fwd']:.2f}m/s 停止距離{p['stop_dist']:.2f}m "
@@ -2800,6 +2868,9 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +              "back_dist": (0.02, 0.5), "self_fwd": (0.1, 0.8), "self_lat": (0.2, 0.8),
 +              "yaw_fix_deg": (-360.0, 360.0), "front_offset": (-0.3, 0.5),
 +              "align_tol_deg": (1.0, 15.0), "om_turn": (0.1, 0.6),
++              "align_inplace_deg": (2.0, 45.0), "veer_v": (0.15, 0.6),
++              "body_half": (0.15, 0.45),
++              "speed_mode": (-1, 2), "cmd_dur": (0.5, 5.0),
 +              "tele_vx": (0.05, 0.6), "tele_vy": (0.05, 0.3), "tele_om": (0.1, 0.8)}
 +
 +    def __init__(self, robot, log=print, hb_ok=lambda: True, is_sim=False):
@@ -2838,7 +2909,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +                v = str(v) if str(v) in ("both", "forward", "side", "back", "step") else "both"
 +            elif k == "step_dir":
 +                v = str(v) if str(v) in ("left", "right", "back", "fwd") else "left"
-+            elif k in ("dry_run", "avoid", "align_wall"):
++            elif k in ("dry_run", "avoid", "align_wall", "wall_track", "gait_cont"):
 +                v = bool(v) if not isinstance(v, str) else (v.lower() in ("1", "true", "on", "yes"))
 +            else:
 +                try:
@@ -3023,6 +3094,9 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +        self.ready = bool(ok)
 +        if ok:
 +            self.enable_sensors(True)
++            fn = getattr(self.robot, "set_speed_mode", None)
++            if fn is not None:
++                fn(int(self.params.get("speed_mode", 0)), log=self.log)
 +            self.log(f"歩行モード(FSM {fsm})。[前進][横歩き]、十字キーの手動操作が押せます")
 +        else:
 +            self.log(f"★歩行モードへ入れませんでした(FSM {fsm})")
@@ -3092,11 +3166,21 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +        lp = None
 +        if self.log_dir is not None:
 +            lp = pathlib.Path(self.log_dir) / time.strftime("walk_%Y%m%d_%H%M%S.jsonl")
++        self.sender.duration = float(self.params.get('cmd_dur', 2.0))
++        fn = getattr(self.robot, 'set_gait_continuous', None)
++        if fn is not None and self.params.get('gait_cont', True) and not self.params.get('dry_run'):
++            fn(True, log=self.log)
++            self._gait_on = True
++
 +        self.auto = AutoWalk(params, io, log_path=lp)
 +        self.auto.start()
 +        return True
 +
 +    def stop(self, why="停止"):
++        fn = getattr(self.robot, "set_gait_continuous", None)
++        if fn is not None and getattr(self, "_gait_on", False):
++            self._gait_on = False
++            fn(False, log=self.log)
 +        """速度ゼロ。damp ではない(内蔵バランスに立たせたまま止める)。"""
 +        if self.auto is not None and not self.auto.done:
 +            self.auto.request_stop(why)
@@ -5136,7 +5220,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
  # ---------------------------------------------------------------- 7. 実機側
 diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png' -x '*.patch' /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/real_robot.py g1-proj-main/real/real_robot.py
 --- /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/real_robot.py	2026-09-03 18:26:29.000000000 +0900
-+++ g1-proj-main/real/real_robot.py	2026-09-04 14:30:07.377762300 +0900
++++ g1-proj-main/real/real_robot.py	2026-09-04 15:01:23.099059580 +0900
 @@ -66,6 +66,12 @@
  #   この窓の間に出しているのは user_lowcmd のストリームだけで、UserCtrlに
  #   入るまでロボットは無視するので、延ばしても機体は動かない。
@@ -5225,7 +5309,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
          elif name == "sit":
              ok, _ = _rpc("SetFsmId(2)", self._loco.SetFsmId, 2, timeout=4.0)
          elif name == "seated":
-@@ -872,6 +928,97 @@
+@@ -872,6 +928,107 @@
          if self._loco is not None:
              _rpc_async("Move", self._loco.Move, vx, vy, omega)
  
@@ -5311,6 +5395,16 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +            log(f"FSM {fid} へ入れなかった(いま {f}、応答 {res})")
 +        return False, f
 +
++    def set_speed_mode(self, mode, log=print):
++        """SetSpeedMode(7107、最新 SDK)。-1/0/1/2(SDK 例の取りうる値。0=標準)。歩行 FSM でだけ効く"""
++        if self._loco is None:
++            return False
++        self._regist_user_apis()
++        import json as _json
++        ok, res = _rpc("SetSpeedMode", self._loco._Call, 7107, _json.dumps({"data": int(mode)}), timeout=2.0)
++        log(f"速度モード(SetSpeedMode {int(mode)}) → {res}")
++        return bool(ok)
++
 +    def set_gait_continuous(self, flag, log=print):
 +        """連続歩容(SetBalanceMode 1 = 速度ゼロでも足踏みを続ける / 0 = 止まる)。歩行 FSM でだけ効く。
 +        小刻みステップで「歩き出しの不感帯」を避けたいときに 1 にする(既定 0)"""
@@ -5344,7 +5438,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
          with np.load(d / "reference.npz") as _z:
 diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png' -x '*.patch' /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/sim_robot.py g1-proj-main/real/sim_robot.py
 --- /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/sim_robot.py	2026-09-03 18:26:29.000000000 +0900
-+++ g1-proj-main/real/sim_robot.py	2026-09-04 14:30:07.377762300 +0900
++++ g1-proj-main/real/sim_robot.py	2026-09-04 15:01:23.099059580 +0900
 @@ -5,6 +5,7 @@
  500Hz相当でPD制御しながら物理を進める。実機なしでコックピットの
  FSM・観測構築・UI・安全系を通しで検証できる(WP6の「DDSモック」)。
@@ -5478,7 +5572,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
          if name == "zero":
              self.set_target(np.zeros(29), np.zeros(29), np.zeros(29))
          elif name == "damp":
-@@ -210,7 +311,72 @@
+@@ -210,7 +311,76 @@
          return True
  
      def loco_move(self, vx, vy, omega):
@@ -5536,6 +5630,10 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +        log("(sim) 歩行 FSM 501 に入りました(運動学モック。バランス制御は模さない)")
 +        return True, 501
 +
++    def set_speed_mode(self, mode, log=print):
++        log(f"(sim) 速度モード {int(mode)}")
++        return True
++
 +    def set_gait_continuous(self, flag, log=print):
 +        log(f"(sim) 連続歩容 {'ON' if flag else 'OFF'}")
 +        return True
@@ -5552,7 +5650,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
  
      # ---- モック専用
      def place(self, qpos_joints, quat, xy, z):
-@@ -245,6 +411,27 @@
+@@ -245,6 +415,27 @@
      def tick(self, n_sub=10):
          """1制御ステップぶん(既定10サブステップ=20ms相当)物理を進める。
          エンジンの50Hzループから呼ぶ(論理時間。壁時計に依存しない)"""
@@ -5963,7 +6061,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +WantedBy=multi-user.target
 diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png' -x '*.patch' /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/test_autowalk.py g1-proj-main/real/test_autowalk.py
 --- /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/test_autowalk.py	1970-01-01 09:00:00.000000000 +0900
-+++ g1-proj-main/real/test_autowalk.py	2026-09-04 14:47:32.516855898 +0900
++++ g1-proj-main/real/test_autowalk.py	2026-09-04 15:05:19.869748690 +0900
 @@ -0,0 +1,333 @@
 +#!/usr/bin/env python3
 +"""autowalk の机上試験(実機不要・1〜2分)。
@@ -6036,8 +6134,8 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +    check(ah and not ah["wall"] and abs((ah["lat_hi"] - ah["lat_lo"]) - 0.6) < 0.15,
 +          f"幅0.6mの箱を障害物と判定(壁でない) 横幅 {None if not ah else round(ah['lat_hi'] - ah['lat_lo'], 2)}")
 +    check(ah and ah["free_l"] is not None and ah["free_r"] is not None
-+          and abs(abs(ah["free_l"]) - 0.8) < 0.1,
-+          f"回り込み先 左{ah.get('free_l')} / 右{ah.get('free_r')} (期待 ±0.80)")
++          and abs(abs(ah["free_l"]) - 0.63) < 0.1,
++          f"回り込み先 左{ah.get('free_l')} / 右{ah.get('free_r')} (期待 ±0.63)")
 +    check(r["side_free"] is None, f"横の空き {r['side_free']} (期待 None=空き)")
 +    # 壁(幅4m)
 +    pw = make_world_cloud(rng, (0.0, 0.0), 1.2, 0.0, box_w=4.0)
@@ -6203,7 +6301,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +    near = (xs > 1.8 - 0.15 - 0.25) & (xs < 1.8 + 0.15 + 0.25)
 +    if near.any():
 +        clearance = np.abs(ys[near]).min() - 0.3
-+        check(clearance > 0.3, f"箱の横を通る間の最小クリアランス {clearance:.2f}m (期待>0.30=肩幅+余裕)")
++        check(0.05 < clearance < 0.35, f"箱の横をギリギリで通る: 最小クリアランス {clearance:.2f}m (期待 0.05〜0.35 = 体の半幅0.25+余白0.08)")
 +    wc.close()
 +
 +

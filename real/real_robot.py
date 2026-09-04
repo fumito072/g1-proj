@@ -1010,6 +1010,16 @@ class RealRobot:
             log(f"FSM {fid} へ入れなかった(いま {f}、応答 {res})")
         return False, f
 
+    def set_speed_mode(self, mode, log=print):
+        """SetSpeedMode(7107、最新 SDK)。-1/0/1/2(SDK 例の取りうる値。0=標準)。歩行 FSM でだけ効く"""
+        if self._loco is None:
+            return False
+        self._regist_user_apis()
+        import json as _json
+        ok, res = _rpc("SetSpeedMode", self._loco._Call, 7107, _json.dumps({"data": int(mode)}), timeout=2.0)
+        log(f"速度モード(SetSpeedMode {int(mode)}) → {res}")
+        return bool(ok)
+
     def set_gait_continuous(self, flag, log=print):
         """連続歩容(SetBalanceMode 1 = 速度ゼロでも足踏みを続ける / 0 = 止まる)。歩行 FSM でだけ効く。
         小刻みステップで「歩き出しの不感帯」を避けたいときに 1 にする(既定 0)"""

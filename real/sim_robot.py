@@ -364,6 +364,10 @@ class SimRobot:
         log("(sim) 歩行 FSM 501 に入りました(運動学モック。バランス制御は模さない)")
         return True, 501
 
+    def set_speed_mode(self, mode, log=print):
+        log(f"(sim) 速度モード {int(mode)}")
+        return True
+
     def set_gait_continuous(self, flag, log=print):
         log(f"(sim) 連続歩容 {'ON' if flag else 'OFF'}")
         return True

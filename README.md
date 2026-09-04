@@ -31,6 +31,7 @@ Unitree G1(29DoF)に強化学習の方策で椅子へ座らせるシステム。
 | LiDAR の壁距離の作り直し(9/4 午後) | `real/lidar_bridge.py`、`real/autowalk.py`、かんたん画面 | 前方を生座標 +X 固定に(床が見える向きは後ろを向いていた)、つま先基準、壁の面を直線フィット、前後左右の最近距離、[前後を反転]、前進時の自動ヨー較正。docs/自動歩行 §6b-4 |
 | 歩行が始まらない原因と修正(9/4 午後) | `real/real_robot.py`(`ensure_walk_mode`)、`sim_robot.py`、UI 表記 | 802 では SetVelocity が効かない(0.35 m/s×4 秒で 4 cm)。最新 SDK の Start()=SetFsmId(500) に合わせ、歩行は loco 500/501 で行い、802 は着座の UserCtrl 入口だけに。docs/自動歩行 §6b-5。実機未検証 |
 | 速度プロファイルと正対(9/4 午後) | `real/autowalk.py`(`speed_profile`, `_move_axis`, `_align_to_wall`)、かんたん画面 | 段階式→距離に応じた連続減速(√(2ad)、応答遅れ込み)、巡航 0.5 m/s と「速さ」選択。横歩き・後退は普通の歩行(10 cm 以下だけ小刻み)。斜めの壁には正対してから前進。docs/自動歩行 §6b-6 |
+| 斜めの回り込み・壁追従・最新 SDK の歩き方(9/4 夕) | `real/autowalk.py`(`_forward`, `_track_wall_heading`)、`real_robot.py`(`set_speed_mode`) | 歩きながら斜めに寄せてギリギリ(余白 8 cm)で回り込み、歩きながら戻る。壁の角度を毎コマ測って垂直を保つ。SetSpeedMode / ContinuousGait / duration 2 s。docs/自動歩行 §6b-7 |
 実機での検証順は 自動歩行 §6(A 距離表示 → B ドライラン → C 十字キー → D 短距離 → E 既定値)。
 
 ## 引き継ぐ人がまず読むもの(この順で)
