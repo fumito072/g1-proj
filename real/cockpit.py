@@ -3434,12 +3434,10 @@ input[type=number]{width:84px}
  <div class="row">椅子との距離を詰める（歩行モードで。後ろは LiDAR が見えないので目で見る）
   <button onclick="nudgeBack(0.05)" style="min-height:44px">▼ 後ろへ5cm</button>
   <button onclick="nudgeBack(0.10)" style="min-height:44px">▼ 後ろへ10cm</button></div>
- <button class="go big" id="sit_btn" onclick="cmd('sit_check')">&#129681; 着座（この位置でよいか確認）</button>
+ <button class="go big" id="sit_btn" onclick="cmd('sit_check')">&#129681; 着座（点検のあと 3 秒後に開始）</button>
  <div id="sitgate" class="gate" hidden>
   <div id="gate_items"></div>
-  <label><input type="checkbox" class="gk" onchange="gateUpd()"> 椅子は真後ろ、座面の前縁が踵の位置にある</label>
-  <label><input type="checkbox" class="gk" onchange="gateUpd()"> 機体は自立して静止している（支えていない）</label>
-  <label><input type="checkbox" class="gk" onchange="gateUpd()"> 周囲に人がいない。リモコンのE-STOPを握っている</label>
+  <div class="st" style="margin:4px 0">椅子が真後ろにあること・周囲に人がいないこと・リモコンのE-STOPを握っていることを見てから押してください。点検に × が無ければ 3 秒後に自動で着座を始めます。</div>
   <div class="btns2"><button class="go" id="gate_go" onclick="sitGo()" disabled>着座を開始（3秒後）</button><button onclick="gateCancel()">やめる</button></div>
   <div id="gate_cd" class="st"></div>
  </div>
@@ -3492,12 +3490,11 @@ function drawWall(w){
   +(w.mount?'　取付: 高さ'+w.mount.height+'m 傾き'+w.mount.tilt_deg+'°':'')+(w.free_l!=null||w.free_r!=null?'　回り込み可 '+(w.free_l!=null?'左':'')+(w.free_r!=null?'右':''):'');
 }
 function gateUpd(){
- const g=S.sit_gate, ks=document.querySelectorAll('.gk');
- const all=Array.from(ks).every(x=>x.checked);
- const b=document.getElementById('gate_go'); if(b)b.disabled=!(g&&g.ok&&all&&!CD);
+ const g=S.sit_gate;
+ const b=document.getElementById('gate_go'); if(b)b.disabled=!(g&&g.ok&&!CD);
 }
 function gateCancel(){ if(CD){clearInterval(CD);CD=null;} GATE_T=null; document.getElementById('sitgate').hidden=true;
- document.querySelectorAll('.gk').forEach(x=>x.checked=false); document.getElementById('gate_cd').textContent='';}
+ document.getElementById('gate_cd').textContent='';}
 function sitGo(){
  const g=S.sit_gate; if(!g||!g.ok)return;
  let n=3; const e=document.getElementById('gate_cd'); e.textContent='3秒後に着座を開始します… [やめる]で中止';
@@ -3538,12 +3535,14 @@ async function tick(){
  drawWall(w);
  document.getElementById('sitst').innerHTML=(d.phases&&d.phases.length?('方策 '+d.phases.join(' → ')+'　コマ '+d.t+'/'+d.n+'<br>'):'')+(d.msg||'');
  const gt=d.sit_gate, gp=document.getElementById('sitgate');
- if(gt&&(gt.token!==GATE_T)){GATE_T=gt.token; document.querySelectorAll('.gk').forEach(x=>x.checked=false); document.getElementById('gate_cd').textContent='';}
+ let fresh=false;
+ if(gt&&(gt.token!==GATE_T)){GATE_T=gt.token; fresh=true; document.getElementById('gate_cd').textContent='';}
  if(gt){gp.hidden=false;
-  document.getElementById('gate_items').innerHTML='<div class="gi"><b>'+(gt.ok?'点検OK — 下の3つを確認して開始':'★点検NG — 直してからもう一度')+'</b>（'+gt.pattern+'、'+gt.age+'秒前）</div>'
+  document.getElementById('gate_items').innerHTML='<div class="gi"><b>'+(gt.ok?'点検OK — 3秒後に着座を開始します':'★点検NG — 直してからもう一度')+'</b>（'+gt.pattern+'、'+gt.age+'秒前）</div>'
    +gt.items.map(it=>'<div class="gi" style="color:'+(it[0]===false?'var(--bad)':(it[0]===null?'var(--warn)':'var(--ok)'))+'">'+(it[0]===false?'×':(it[0]===null?'△':'○'))+' '+it[1]+'</div>').join('');
   if(gt.age>30){gateCancel();}
   gateUpd();
+  if(fresh&&gt.ok&&!CD&&gt.age<10){sitGo();}
  } else if(!CD){gp.hidden=true;}
  document.getElementById('log').textContent=(d.logs||[]).slice(-10).join(String.fromCharCode(10));
 }

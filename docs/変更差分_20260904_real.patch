@@ -659,7 +659,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +echo "Android: 機体と同じWi-Fi(SSID SPW_X11_fce0f9)に接続して http://192.168.179.100:8090 を開く"
 diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png' -x '*.patch' -x walk_calib.json "/tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/docs/Android\347\204\241\347\267\232\346\223\215\344\275\234.md" "g1-proj-main/docs/Android\347\204\241\347\267\232\346\223\215\344\275\234.md"
 --- "/tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/docs/Android\347\204\241\347\267\232\346\223\215\344\275\234.md"	1970-01-01 09:00:00.000000000 +0900
-+++ "g1-proj-main/docs/Android\347\204\241\347\267\232\346\223\215\344\275\234.md"	2026-09-04 14:48:55.010590189 +0900
++++ "g1-proj-main/docs/Android\347\204\241\347\267\232\346\223\215\344\275\234.md"	2026-09-04 16:18:42.764756167 +0900
 @@ -0,0 +1,141 @@
 +# Android から無線でコックピットを操作する(2026-09-04 整備)
 +
@@ -705,14 +705,14 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +| 判定バー | ● 実行してよい / ▲ 要注意 / ■ 実行できません(理由つき)。通信が途絶えていた直後は黄色の帯で「x 秒途絶・途絶中の対応」 |
 +| 基本操作 | **ダンプ / スタンドロック(FSM4) / 歩行モード(802)** |
 +| 歩く | **速さ**(ゆっくり 0.3 / ふつう 0.5 / はやい 0.7 m/s。壁や物の距離に応じて連続的に減速)・**壁の手前で止まる距離**・**横歩きの向きと距離**・障害物の回り込み on/off。**[▲ 前進]**(壁の手前で段階的に減速して停止、壁以外は回り込み)、**[◀▶ 横歩き]**(足踏みパルスで指定距離)、**[左へ5cm][右へ5cm]**(微調整)、**[■ 歩行停止]**。**「正面の壁までの距離」**の大きな数字(壁の面を当てて、つま先から。LiDAR は起動時から自動で読む。赤=停止距離以内、黄=手前0.5m、緑=余裕)。手前に物があれば別行で「手前 x m に障害物」。**前/後/左/右の最近距離**と **[⇄ 前後を反転]**(数字が後ろの壁と合っているとき)。前進すると向きを自動較正。上面図などの可視化は無し(操作者の指示) |
-+| 座る | 方策の選択、**[▼ 後ろへ5cm/10cm]**(歩行モードで椅子との距離を詰める)、**[着座（この位置でよいか確認）]** → サーバ側の点検(○×△)→ 操作者の3項目チェック → **3秒カウントダウン**(やめるで中止)→ 着座開始 |
++| 座る | 方策の選択、**[▼ 後ろへ5cm/10cm]**(歩行モードで椅子との距離を詰める)、**[着座（点検のあと 3 秒後に開始）]** → サーバ側の点検(○×△。× があれば拒否)→ **3 秒カウントダウン**(やめるで中止)→ 着座開始(2026-09-04 夕: 操作者の 3 項目チェックは廃止) |
 +| 通信が切れたときの動作 | いまの状態で切れたら何をするかを常に表示(docs/通信途絶時の安全設計_20260904.md) |
 +| 画面下の固定バー | **E-STOP** と **歩行停止** |
 +
 +着座の確認で点検する項目: 実行可否(制御ループ・電源・E-STOPラッチ)、傾き 10 度未満、
 +静止(関節速度RMS 0.10 未満)、内蔵FSM が立位/歩行/UserCtrl、参照との向きのずれ、
 +LiDAR で後方に座面らしい面が見えるか(参考。頭の LiDAR は後ろ下が死角)、しゃがみ深さ。
-+× が1つでもあればサーバが開始を拒否する。確認は 30 秒で失効する。
++× が1つでもあればサーバが開始を拒否する。確認は 30 秒で失効する。チェックボックスは無く、点検 OK なら 3 秒後に自動で始まる([やめる]で中止)。
 +
 +### 詳細画面
 +
@@ -3690,7 +3690,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +        }
 diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png' -x '*.patch' -x walk_calib.json /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/cockpit.py g1-proj-main/real/cockpit.py
 --- /tmp/claude-1000/-home-colapis--------G1-----------/1bd8013e-2eaa-493e-b608-f25426e5b0bc/scratchpad/pristine/g1-proj-main/real/cockpit.py	2026-09-03 18:26:29.000000000 +0900
-+++ g1-proj-main/real/cockpit.py	2026-09-04 14:43:31.879823671 +0900
++++ g1-proj-main/real/cockpit.py	2026-09-04 16:18:42.763756165 +0900
 @@ -16,6 +16,7 @@
  import gc
  import json
@@ -4732,7 +4732,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
   document.getElementById('sel_armmode').value=d.arm_res_mode||'lat';
   const ps=document.getElementById('polscale');
   if(ps){const p=d.pol_scale;
-@@ -2558,14 +3221,349 @@
+@@ -2558,14 +3221,348 @@
   document.getElementById('log').textContent=d.logs.join('\\n');
   document.getElementById('next').disabled=(d.fsm!=='WAIT_CONFIRM');
   document.getElementById('place').style.display=d.is_sim?'inline-block':'none';
@@ -4950,12 +4950,10 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 + <div class="row">椅子との距離を詰める（歩行モードで。後ろは LiDAR が見えないので目で見る）
 +  <button onclick="nudgeBack(0.05)" style="min-height:44px">▼ 後ろへ5cm</button>
 +  <button onclick="nudgeBack(0.10)" style="min-height:44px">▼ 後ろへ10cm</button></div>
-+ <button class="go big" id="sit_btn" onclick="cmd('sit_check')">&#129681; 着座（この位置でよいか確認）</button>
++ <button class="go big" id="sit_btn" onclick="cmd('sit_check')">&#129681; 着座（点検のあと 3 秒後に開始）</button>
 + <div id="sitgate" class="gate" hidden>
 +  <div id="gate_items"></div>
-+  <label><input type="checkbox" class="gk" onchange="gateUpd()"> 椅子は真後ろ、座面の前縁が踵の位置にある</label>
-+  <label><input type="checkbox" class="gk" onchange="gateUpd()"> 機体は自立して静止している（支えていない）</label>
-+  <label><input type="checkbox" class="gk" onchange="gateUpd()"> 周囲に人がいない。リモコンのE-STOPを握っている</label>
++  <div class="st" style="margin:4px 0">椅子が真後ろにあること・周囲に人がいないこと・リモコンのE-STOPを握っていることを見てから押してください。点検に × が無ければ 3 秒後に自動で着座を始めます。</div>
 +  <div class="btns2"><button class="go" id="gate_go" onclick="sitGo()" disabled>着座を開始（3秒後）</button><button onclick="gateCancel()">やめる</button></div>
 +  <div id="gate_cd" class="st"></div>
 + </div>
@@ -5008,12 +5006,11 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 +  +(w.mount?'　取付: 高さ'+w.mount.height+'m 傾き'+w.mount.tilt_deg+'°':'')+(w.free_l!=null||w.free_r!=null?'　回り込み可 '+(w.free_l!=null?'左':'')+(w.free_r!=null?'右':''):'');
 +}
 +function gateUpd(){
-+ const g=S.sit_gate, ks=document.querySelectorAll('.gk');
-+ const all=Array.from(ks).every(x=>x.checked);
-+ const b=document.getElementById('gate_go'); if(b)b.disabled=!(g&&g.ok&&all&&!CD);
++ const g=S.sit_gate;
++ const b=document.getElementById('gate_go'); if(b)b.disabled=!(g&&g.ok&&!CD);
 +}
 +function gateCancel(){ if(CD){clearInterval(CD);CD=null;} GATE_T=null; document.getElementById('sitgate').hidden=true;
-+ document.querySelectorAll('.gk').forEach(x=>x.checked=false); document.getElementById('gate_cd').textContent='';}
++ document.getElementById('gate_cd').textContent='';}
 +function sitGo(){
 + const g=S.sit_gate; if(!g||!g.ok)return;
 + let n=3; const e=document.getElementById('gate_cd'); e.textContent='3秒後に着座を開始します… [やめる]で中止';
@@ -5054,12 +5051,14 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
 + drawWall(w);
 + document.getElementById('sitst').innerHTML=(d.phases&&d.phases.length?('方策 '+d.phases.join(' → ')+'　コマ '+d.t+'/'+d.n+'<br>'):'')+(d.msg||'');
 + const gt=d.sit_gate, gp=document.getElementById('sitgate');
-+ if(gt&&(gt.token!==GATE_T)){GATE_T=gt.token; document.querySelectorAll('.gk').forEach(x=>x.checked=false); document.getElementById('gate_cd').textContent='';}
++ let fresh=false;
++ if(gt&&(gt.token!==GATE_T)){GATE_T=gt.token; fresh=true; document.getElementById('gate_cd').textContent='';}
 + if(gt){gp.hidden=false;
-+  document.getElementById('gate_items').innerHTML='<div class="gi"><b>'+(gt.ok?'点検OK — 下の3つを確認して開始':'★点検NG — 直してからもう一度')+'</b>（'+gt.pattern+'、'+gt.age+'秒前）</div>'
++  document.getElementById('gate_items').innerHTML='<div class="gi"><b>'+(gt.ok?'点検OK — 3秒後に着座を開始します':'★点検NG — 直してからもう一度')+'</b>（'+gt.pattern+'、'+gt.age+'秒前）</div>'
 +   +gt.items.map(it=>'<div class="gi" style="color:'+(it[0]===false?'var(--bad)':(it[0]===null?'var(--warn)':'var(--ok)'))+'">'+(it[0]===false?'×':(it[0]===null?'△':'○'))+' '+it[1]+'</div>').join('');
 +  if(gt.age>30){gateCancel();}
 +  gateUpd();
++  if(fresh&&gt.ok&&!CD&&gt.age<10){sitGo();}
 + } else if(!CD){gp.hidden=true;}
 + document.getElementById('log').textContent=(d.logs||[]).slice(-10).join(String.fromCharCode(10));
 +}
@@ -5083,7 +5082,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
  
  class Handler(BaseHTTPRequestHandler):
      engine = None
-@@ -2603,8 +3601,17 @@
+@@ -2603,8 +3600,17 @@
              self._send(json.dumps(d).encode(), "application/json")
          elif p == "/frame.jpg" and self.engine.is_sim:
              self._send(self.engine.robot.render_jpeg(), "image/jpeg")
@@ -5102,7 +5101,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
  
      def do_POST(self):
          q = parse_qs(urlparse(self.path).query)
-@@ -2618,6 +3625,13 @@
+@@ -2618,6 +3624,13 @@
              self.engine.estop_now(why)
          elif c == "beat":
              self.engine.beat()
@@ -5116,7 +5115,7 @@ diff -ruN -x logs -x __pycache__ -x '*.pyc' -x deploy_archive_20260904 -x '*.png
          elif c == "select" and a and ":" in a:
              k, v = a.split(":", 1)
              self.engine.command("select", (k, v))
-@@ -2695,6 +3709,7 @@
+@@ -2695,6 +3708,7 @@
          #   出ないままプロセスが終わり得た。close() は damp を実際に
          #   送り切ってから送信スレッドを止める
          eng.estop_now("サーバ終了")
