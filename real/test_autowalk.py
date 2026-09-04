@@ -249,7 +249,7 @@ def test_side():
     print(f"    結果: {wc.auto.result}  y={robot._wy:.3f}  {wc.auto.steps}歩 所要{dt:.1f}秒")
     check(wc.auto.result.startswith("完了") and abs(robot._wy - 0.5) < 0.04,
           f"左へ0.50m: y={robot._wy:.3f} (期待0.50±0.04)")
-    check(2 <= wc.auto.steps <= 20, f"歩数 {wc.auto.steps} (期待2〜20)")
+    check(wc.auto.steps == 0, f"0.5m は普通の歩行(小刻みステップ 0 回): 歩数 {wc.auto.steps}")
     y1 = robot._wy
     check(wc.start_auto(dict(side_dir="right", side_dist=0.05)), "微調整 右へ5cm 開始")
     dt = _wait(wc, 60)
@@ -286,6 +286,23 @@ def test_side():
     wc.close()
 
 
+def test_align():
+    print("--- 5b. 斜めの壁: 最初に回転して正対してから前進 ---")
+    robot, tk, wc = _setup([dict(x=2.5, y=0.0, w=4.0, d=0.2, h=1.0)],
+                           dict(v_fwd=0.5, stop_dist=0.6, mode="forward", max_fwd=6.0))
+    robot._wyaw = math.radians(20.0)              # 機体が壁に対して 20 度斜めに立っている
+    time.sleep(0.6)                               # モックの判定が新しい向きで更新されるのを待つ
+    check(wc.start_auto(), "前進 開始(壁が 20° 斜め)")
+    dt = _wait(wc, 90)
+    yaw_end = math.degrees(robot._wyaw)
+    print(f"    結果: {wc.auto.result}  yaw={yaw_end:+.1f}°  x={robot._wx:.2f} y={robot._wy:.2f}  所要{dt:.1f}秒")
+    check(abs(yaw_end) < 5.0, f"正対した: 終了時のヨー {yaw_end:+.1f}° (期待 ±5°)")
+    check(wc.auto.result.startswith("完了") and abs(robot._wx - (2.5 - 0.6)) < 0.25,
+          f"正対後に壁の手前で停止 x={robot._wx:.2f} (期待1.90±0.25)")
+    tk.on = False
+    wc.close()
+
+
 def test_hb_loss():
     print("--- 6. ハートビート途絶 ---")
     robot, tk, wc = _setup([dict(x=2.0, y=0.0, w=4.0, d=0.2, h=1.0)],
@@ -305,6 +322,7 @@ if __name__ == "__main__":
     test_wall()
     test_detour()
     test_side()
+    test_align()
     test_hb_loss()
     print("=" * 60)
     if FAIL:

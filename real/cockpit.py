@@ -1078,7 +1078,7 @@ class Engine:
             return
         mode = d.get("mode", "forward")
         keep = {k: v for k, v in d.items() if k in ("stop_dist", "side_dir", "side_dist",
-                                                    "avoid", "v_fwd", "dry_run", "step_v")}
+                                                    "avoid", "v_fwd", "v_side", "dry_run", "step_v")}
         if d.get("nudge"):                         # 5cm の微調整は設定を汚さない
             keep.pop("side_dist", None)
             keep.pop("side_dir", None)
@@ -3395,6 +3395,7 @@ input[type=number]{width:84px}
 
 <section><h2>歩く</h2>
  <div class="row">
+  <label>速さ <select id="w_speed" onchange="cmd('walk_param',JSON.stringify({v_fwd:+this.value, v_side:Math.min(0.35,+this.value*0.5)}))"><option value="0.3">ゆっくり 0.3</option><option value="0.5" selected>ふつう 0.5</option><option value="0.7">はやい 0.7</option></select> m/s</label>
   <label>壁の手前で止まる距離 <input id="w_stop" type="number" step="0.05" min="0.3" max="2.5" value="0.60"> m</label>
   <label>横歩き <select id="w_dir"><option value="left">左へ</option><option value="right">右へ</option></select>
    <input id="w_side" type="number" step="0.05" min="0.02" max="3" value="0.50"> m</label>
@@ -3405,7 +3406,7 @@ input[type=number]{width:84px}
   <button class="go" id="b_side" onclick="walkGo('side')">&#9664;&#9654; 横歩き</button>
   <button class="stop" onclick="cmd('walk_stop')">&#9632; 歩行停止</button>
  </div>
- <div class="st" style="margin:8px 0 2px">小刻みステップ — 内蔵歩行に短い指令を出して1歩ずつ動き、オドメトリで測る。まず [1歩] で何cm動くかを見る。
+ <div class="st" style="margin:8px 0 2px">微調整(10cm 未満)は小刻みステップ、それ以上は普通の歩行。[1歩] は1歩だけ出して何cm動くかを見る。
   強さ <select id="w_stepv" onchange="cmd('walk_param',JSON.stringify({step_v:+this.value}))"><option value="0.15">弱 0.15</option><option value="0.2" selected>中 0.20</option><option value="0.3">強 0.30</option></select>
   <span id="stepinfo">-</span></div>
  <div class="btns3">
@@ -3461,7 +3462,8 @@ let S={}, META=null, LASTOK=0, GATE_T=null, CD=null;
 function cmd(c,a){fetch('/cmd?c='+c+(a?('&a='+encodeURIComponent(a)):''),{method:'POST'}).catch(function(){})}
 function sel(k){cmd('select',k+':'+document.getElementById('sel_'+k).value)}
 function walkGo(mode){
- const d={mode:mode, stop_dist:+document.getElementById('w_stop').value,
+ const vf=+(document.getElementById('w_speed')||{value:0.5}).value;
+ const d={mode:mode, v_fwd:vf, v_side:Math.min(0.35,vf*0.5), stop_dist:+document.getElementById('w_stop').value,
   side_dir:document.getElementById('w_dir').value, side_dist:+document.getElementById('w_side').value,
   avoid:document.getElementById('w_avoid').checked};
  cmd('walk_go',JSON.stringify(d));
@@ -3471,6 +3473,7 @@ function nudgeBack(m){cmd('walk_go',JSON.stringify({mode:'back',nudge:true,back_
 function step1(dir){cmd('walk_go',JSON.stringify({mode:'step',dir:dir}))}
 function drawWall(w){
  const si=document.getElementById('stepinfo'); if(si) si.textContent='1歩≈'+(w.step_est_cm!=null?w.step_est_cm:'-')+'cm（前回 '+(w.step_last_cm!=null?w.step_last_cm:'-')+'cm、'+(w.steps||0)+'歩）';
+ const sp=document.getElementById('w_speed'); if(sp&&w.params&&w.params.v_fwd!=null&&document.activeElement!==sp){ const t=String(+w.params.v_fwd); for(const o of sp.options){ if(String(+o.value)===t) sp.value=o.value; } }
  const sv=document.getElementById('w_stepv'); if(sv&&w.params&&w.params.step_v!=null&&document.activeElement!==sv){ const t=String(+w.params.step_v); for(const o of sv.options){ if(String(+o.value)===t) sv.value=o.value; } }
  const v=document.getElementById('walldist_v'), s=document.getElementById('walldist_s'); if(!v)return;
  const p=w.params||{}, sd=p.stop_dist||0.6;

@@ -47,9 +47,14 @@ import numpy as np
 
 # ---------------------------------------------------------------- 既定値
 WALK_DEFAULTS = dict(
-    v_fwd=0.35,        # 前進の巡航速度[m/s]。G1の歩行は0.3〜0.9で安定。まずは遅く
-    v_side=0.15,       # 横歩き(足踏みパルス)の速度[m/s]。横は前進より不安定なので低め
-    v_creep=0.12,      # 忍び足の最低速度[m/s]。★内蔵歩行は 0.1m/s 未満では歩かない(2026-09-04 実測の疑い)
+    v_fwd=0.50,        # 前進の巡航速度[m/s](かんたん画面の「速さ」: ゆっくり0.3/ふつう0.5/はやい0.7)
+    v_side=0.25,       # 横歩き・後退の巡航速度[m/s](普通の歩行。横は前進より不安定なので低め)
+    v_creep=0.15,      # 歩き続けられる最低速度[m/s]。★内蔵歩行は 0.1m/s 未満では歩かない(2026-09-04 実測の疑い)
+    a_dec=0.25,        # 壁・目標へ向けた減速度[m/s²]。v²/(2a) 手前から滑らかに落とす(0.5m/s なら 0.5m 手前)
+    cmd_lag=0.30,      # 内蔵歩行の応答遅れの見込み[s]。この分だけ早めに減速する
+    align_wall=True,   # 前進の前に、正面の壁が斜めならその場で回転して正対する(2026-09-04 操作者の指示)
+    align_tol_deg=3.0, # 正対したとみなす角度[deg]
+    om_turn=0.30,      # 正対の回転速度の上限[rad/s]
     stop_dist=0.60,    # 壁(障害物)のこの距離手前で止まる[m](骨盤基準)
     side_dist=0.50,    # 横歩きの距離[m]
     side_dir="left",   # 横歩きの向き "left"/"right"
@@ -89,8 +94,8 @@ YAW_KP = 1.6                       # 直進保持のゲイン[(rad/s)/rad](旧�
 YAW_OM_MAX = 0.30                  # 直進保持の補正上限[rad/s]
 LAT_KP = 0.6                       # 経路線への横ずれ補正[(m/s)/m]
 LAT_VY_MAX = 0.08                  # 同・上限[m/s]
-ACC_UP = 0.30                      # 前進の加速上限[m/s²]
-ACC_DOWN = 0.60                    # 前進の減速上限[m/s²]
+ACC_UP = 0.50                      # 加速の上限[m/s²](0.5m/s まで 1 秒)
+ACC_DOWN = 0.80                    # 急な減速の上限[m/s²](プロファイル自体は a_dec で滑らか)
 SEND_HZ = 10.0                     # 速度送信の周期
 CMD_HOLD_S = 0.5                   # 指令の有効期間。これを過ぎたらゼロを送る
 TILT_ABORT_DEG = 25.0              # 歩行中にこれを超えたら自動歩行を止める
@@ -129,21 +134,25 @@ def _wrap(a):
     return (a + math.pi) % (2 * math.pi) - math.pi
 
 
-def stage_speed(v_max, d_rem, v_creep=0.12):
-    """壁までの残り距離(停止距離を引いた値)に応じた前進速度。段階的に落として忍び足で止まる"""
+def speed_profile(v_max, d_rem, v_min=0.15, a_dec=0.25, v_now=0.0, lag=0.3, tol=0.03):
+    """残り距離 d_rem[m](目標・停止点まで)に応じた目標速度[m/s]。**連続で滑らか**。
+    減速度 a_dec で止まれる速度 sqrt(2·a·d) を上限に、巡航 v_max と最低 v_min の間に収める。
+    応答遅れ lag の分(v_now·lag)だけ手前から減速する。残りが tol 以内なら 0。
+    (2026-09-04 午後: 段階式 stage_speed を置き換え。操作者の「距離に応じて可変・なめらか」)"""
     if d_rem is None:
-        return v_max
-    if d_rem <= 0.0:
+        return float(v_max)
+    d = float(d_rem) - float(v_now) * float(lag)
+    if float(d_rem) <= tol:
         return 0.0
-    if d_rem < 0.25:
-        return max(v_creep, 0.15 * v_max)
-    if d_rem < 0.6:
-        return max(v_creep, 0.35 * v_max)
-    if d_rem < 1.0:
-        return 0.55 * v_max
-    if d_rem < 1.5:
-        return 0.80 * v_max
-    return v_max
+    if d <= 0.0:
+        return float(v_min)
+    v = math.sqrt(2.0 * float(a_dec) * d)
+    return float(min(v_max, max(v_min, v)))
+
+
+def stage_speed(v_max, d_rem, v_creep=0.15):
+    """互換: 段階式の名残。いまは speed_profile と同じ連続プロファイル"""
+    return speed_profile(v_max, d_rem, v_min=v_creep)
 
 
 # ---------------------------------------------------------------- 実機の購読
@@ -962,17 +971,117 @@ class AutoWalk:
             if single:
                 return True
 
+    NUDGE_MAX = 0.10                # これ未満の移動は小刻みステップ(1歩)、以上は普通の歩行
+
+    def _move_axis(self, axis, target, label):
+        """普通の歩行で目標まで動く(2026-09-04 午後。小刻みステップは 10cm 未満の微調整だけ)。
+        axis='e'(横。+左) / 's'(経路に沿って。+前)。速度は残り距離の連続プロファイル
+        (sqrt(2·a·d)、最低 v_creep、上限 v_side)。行き過ぎたら逆向きにゆっくり戻す(2 回まで)。
+        戻り値: 到達したか(横に障害物 / 前が停止距離以内なら False)"""
+        p = self.p
+        tol = max(0.03, float(p["side_tol"]))
+        v_max = float(p["v_side"])
+        v_min = float(p["v_creep"])
+        a_dec = min(0.2, float(p.get("a_dec", 0.25)))
+        lag = float(p.get("cmd_lag", 0.3))
+        od, obs = self._sense()
+        s0, e0 = self._pose(od)
+        x0 = s0 if axis == "s" else e0
+        t_limit = 15.0 + abs(target - x0) / max(v_min, 0.05) * 2.0
+        t0 = time.time()
+        t_prev = t0
+        v = 0.0
+        last_sgn = 0
+        reversals = 0
+        hist = []                                   # (時刻, 位置) 動かない検出用
+        while True:
+            time.sleep(0.1)
+            now = time.time()
+            dt = max(0.02, min(0.3, now - t_prev))
+            t_prev = now
+            od, obs = self._sense()
+            s, e = self._pose(od)
+            self.offset = e
+            if axis == "s":
+                self.traveled = s
+            x = s if axis == "s" else e
+            rem = target - x
+            hist.append((now, x))
+            # 応答遅れの分だけ手前で止める(止めた後もその間は進む)
+            if abs(rem) <= tol + abs(v) * lag:
+                self._hold(0.6, f"{label}: 停止(残り{rem * 100:+.0f}cm)")
+                od, obs = self._sense()
+                s, e = self._pose(od)
+                self.offset = e
+                x = s if axis == "s" else e
+                rem = target - x
+                if abs(rem) <= tol * 1.5:
+                    self.msg = f"{label}: 到達(残り{rem * 100:+.0f}cm)"
+                    return True
+                v = 0.0
+                hist = []
+                continue
+            # 指令を出しているのに 4 秒で 2cm も動かない → 内蔵歩行が応じていない
+            if abs(v) >= v_min - 1e-6 and len(hist) >= 2 and now - hist[0][0] >= 4.0:
+                x_old = [xx for tt, xx in hist if tt <= now - 4.0]
+                if x_old and abs(x - x_old[-1]) < 0.02:
+                    self.io["vel"](0.0, 0.0, 0.0)
+                    raise _Abort(f"中止({self.phase}): 4秒送って進み{abs(x - x_old[-1]) * 100:.1f}cm — 歩行モードが"
+                                 "速度指令に応じていない(十字キーで歩けるか確認。docs 自動歩行 §6b-5)")
+            if now - t0 > t_limit:
+                raise _Abort(f"中止({self.phase}): 時間切れ({t_limit:.0f}秒、残り{rem * 100:+.0f}cm)")
+            sgn = 1.0 if rem > 0 else -1.0
+            if last_sgn and sgn != last_sgn:
+                reversals += 1
+                if reversals > 2:
+                    self._hold(0.6, f"{label}: 行き過ぎ {rem * 100:+.0f}cm はこれ以上追いません")
+                    return True
+                v = 0.0                             # 向きが変わるときは一度止める
+            last_sgn = sgn
+            if axis == "e":
+                sf = obs.get("side_free_l" if sgn > 0 else "side_free_r") if obs.get("ok") else None
+                if sf is not None and sf < p["side_clear"]:
+                    self.io["vel"](0.0, 0.0, 0.0)
+                    self.msg = f"{label}: 横{sf:.2f}mに障害物 — 止めます"
+                    return False
+            elif sgn > 0:
+                d_front = obs.get("dist") if obs.get("ok") else None
+                if d_front is not None and d_front < p["stop_dist"] + 0.05:
+                    self.io["vel"](0.0, 0.0, 0.0)
+                    self.msg = f"{label}: 前方{d_front:.2f}m(停止距離{p['stop_dist']:.2f}m) — 前へは出しません"
+                    return False
+            v_t = speed_profile(v_max, abs(rem), v_min, a_dec, abs(v), lag, tol)
+            if v_t > abs(v):
+                v = min(v_t, abs(v) + ACC_UP * dt)
+            else:
+                v = max(v_t, abs(v) - ACC_DOWN * dt)
+            vcmd = sgn * v
+            if axis == "e":
+                self.io["vel"](0.0, vcmd, self._om())
+            else:
+                vy = float(np.clip(-LAT_KP * e, -LAT_VY_MAX, LAT_VY_MAX))
+                self.io["vel"](vcmd, vy, self._om())
+            self.msg = f"{label}: v={vcmd:+.2f}m/s 残り{rem * 100:+.0f}cm"
+            self._rec(v=round(vcmd, 3), x=round(float(x), 3), rem=round(float(rem), 3))
+
     def _lateral_to(self, e_target, label):
-        """経路線からのずれ e を e_target へ(小刻みステップ)。到達したか(横に障害物なら False)"""
-        return self._step_axis("e", e_target, label)
+        """経路線からのずれ e を e_target へ。10cm 以上は普通の歩行、未満は小刻みステップ。
+        戻り値: 到達したか(横に障害物なら False)"""
+        od, _obs = self._sense()
+        _s, e = self._pose(od)
+        if abs(e_target - e) <= self.NUDGE_MAX + 1e-6:
+            return self._step_axis("e", e_target, label)
+        return self._move_axis("e", e_target, label)
 
     def _back_to(self, dist, label):
-        """後退(椅子との距離を詰める)。経路に沿って dist だけ下がる(小刻みステップ)。
-        後ろは LiDAR が見えないので操作者が目で見る前提。"""
+        """後退(椅子との距離を詰める)。経路に沿って dist だけ下がる。10cm 以上は普通の歩行、
+        未満は小刻みステップ。後ろは LiDAR が見えないので操作者が目で見る前提。"""
         od, _obs = self._sense()
         s0, _e = self._pose(od)
         self.traveled_base = self.traveled
-        return self._step_axis("s", s0 - dist, label)
+        if dist <= self.NUDGE_MAX + 1e-6:
+            return self._step_axis("s", s0 - dist, label)
+        return self._move_axis("s", s0 - dist, label)
 
     def _step_once(self, direction):
         """1歩だけ(かんたん画面の [1歩] ボタン)。戻り値: 結果の文"""
@@ -991,6 +1100,59 @@ class AutoWalk:
         d = self.step_last
         return (f"1歩({ {'left': '左', 'right': '右', 'fwd': '前', 'back': '後ろ'}.get(direction, direction)}): "
                 f"{(d or 0.0) * 100:+.1f}cm 動きました")
+
+    def _align_to_wall(self):
+        """正面の壁が斜めなら、その場で回転して壁に正対する(壁の面フィットの角度 wall_ang を使う)。
+        wall_ang = 壁の法線が進行方向から左へ何度ずれているか。正なら左へ回る。
+        戻り値: 回った角度[deg](壁が見えない/正対済みなら 0)"""
+        p = self.p
+        tol = float(p.get("align_tol_deg", 3.0))
+        om_max = float(p.get("om_turn", 0.3))
+        self._hold(0.4, "正対: 壁の向きを読んでいます")     # 歩行モードに入った直後の新しい点群を待つ
+        od, obs = self._sense()
+        ang = obs.get("wall_ang") if obs.get("ok") else None
+        if ang is None or abs(ang) <= tol:
+            return 0.0
+        self.phase = "ALIGN"
+        self.io["log"](f"正面の壁が {ang:+.1f}° 斜めです — その場で回転して正対します(壁 {obs.get('wall_dist')}m)")
+        yaw0 = self.io["yaw"]()
+        t0 = time.time()
+        ok_n = 0
+        miss = 0
+        while True:
+            time.sleep(0.1)
+            od, obs = self._sense()
+            ang = obs.get("wall_ang") if obs.get("ok") else None
+            if time.time() - t0 > 20.0:
+                self.io["vel"](0.0, 0.0, 0.0)
+                raise _Abort("中止(ALIGN): 正対の時間切れ(20秒)")
+            if ang is None:
+                miss += 1
+                if miss > 10:                       # 1 秒以上壁を見失った
+                    self.io["vel"](0.0, 0.0, 0.0)
+                    self.io["log"]("正対: 回転中に壁の面を見失いました — そのまま前進します")
+                    break
+                continue
+            miss = 0
+            if abs(ang) <= tol:
+                ok_n += 1
+                if ok_n >= 3:
+                    self.io["vel"](0.0, 0.0, 0.0)
+                    break
+            else:
+                ok_n = 0
+            # 角度に比例(1.2 rad/s per rad)。小さすぎると足踏みで回らないので最低 0.12 rad/s
+            om = math.radians(ang) * 1.2
+            om = max(-om_max, min(om_max, om))
+            if abs(om) < 0.12:
+                om = math.copysign(0.12, om)
+            self.io["vel"](0.0, 0.0, om)
+            self.msg = f"正対中: 壁の角度 {ang:+.1f}° 回転 {om:+.2f}rad/s"
+            self._rec(om=round(om, 3), wall_ang=ang)
+        self._hold(0.8, "正対: 静定")
+        turned = math.degrees(_wrap(self.io["yaw"]() - yaw0))
+        self.io["log"](f"正対しました(回転 {turned:+.1f}°、壁の角度 {ang if ang is None else round(ang, 1)}°)")
+        return turned
 
     def _forward(self):
         """壁の手前(stop_dist)で止まるか、最大前進距離で止まるまで進む。
@@ -1050,8 +1212,8 @@ class AutoWalk:
                 self.io["vel"](0.0, 0.0, 0.0)
                 self.v = 0.0
                 return "max"
-            # --- 段階的な速度 + 加減速の上限で滑らかに
-            v_t = stage_speed(p["v_fwd"], d_rem, p["v_creep"])
+            # --- 距離に応じた連続プロファイル(壁の手前から sqrt(2·a·d) で滑らかに落ちる)+ 加減速の上限
+            v_t = speed_profile(p["v_fwd"], d_rem, p["v_creep"], p.get("a_dec", 0.25), self.v, p.get("cmd_lag", 0.3))
             if v_t > self.v:
                 self.v = min(v_t, self.v + ACC_UP * dt)
             else:
@@ -1148,6 +1310,11 @@ class AutoWalk:
             self.result = f"完了: {'左' if sdir > 0 else '右'}へ{self.side_traveled:.2f}m横移動"
             log(f"自動歩行 {self.result}")
             return
+        if p.get("align_wall", True) and mode in ("both", "forward"):
+            turned = self._align_to_wall()
+            if abs(turned) > 0.5:
+                od, obs = self._sense()
+                self._set_path(od)                  # 正対した向きで経路(直進の基準)を張り直す
         how = self._forward()
         if how == "max":
             self.result = (f"完了(壁なし): 最大前進距離{p['max_fwd']:.1f}mに到達"
@@ -1188,7 +1355,7 @@ class WalkController:
       ensure_walk_mode(log) -> (ok, fsm)            歩行FSMへ
     """
 
-    RANGES = {"v_fwd": (0.05, 0.9), "v_side": (0.05, 0.4), "v_creep": (0.1, 0.25),
+    RANGES = {"v_fwd": (0.1, 1.0), "v_side": (0.1, 0.5), "v_creep": (0.1, 0.25), "a_dec": (0.1, 0.6), "cmd_lag": (0.0, 0.8),
               "stop_dist": (0.3, 2.5), "side_dist": (0.02, 3.0),
               "max_fwd": (0.3, 10.0), "half_w": (0.2, 0.6), "h_min": (0.05, 0.5),
               "h_max": (0.5, 2.5), "side_clear": (0.2, 1.5), "wall_width": (0.8, 3.0),
@@ -1198,6 +1365,7 @@ class WalkController:
               "step_min_on": (0.15, 0.8), "step_est": (0.01, 0.3), "step_max": (1, 60),
               "back_dist": (0.02, 0.5), "self_fwd": (0.1, 0.8), "self_lat": (0.2, 0.8),
               "yaw_fix_deg": (-360.0, 360.0), "front_offset": (-0.3, 0.5),
+              "align_tol_deg": (1.0, 15.0), "om_turn": (0.1, 0.6),
               "tele_vx": (0.05, 0.6), "tele_vy": (0.05, 0.3), "tele_om": (0.1, 0.8)}
 
     def __init__(self, robot, log=print, hb_ok=lambda: True, is_sim=False):
@@ -1236,7 +1404,7 @@ class WalkController:
                 v = str(v) if str(v) in ("both", "forward", "side", "back", "step") else "both"
             elif k == "step_dir":
                 v = str(v) if str(v) in ("left", "right", "back", "fwd") else "left"
-            elif k in ("dry_run", "avoid"):
+            elif k in ("dry_run", "avoid", "align_wall"):
                 v = bool(v) if not isinstance(v, str) else (v.lower() in ("1", "true", "on", "yes"))
             else:
                 try:
