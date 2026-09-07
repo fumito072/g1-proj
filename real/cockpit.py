@@ -1121,6 +1121,8 @@ class Engine:
             ov["step_dir"] = str(d.get("dir", "left"))
         elif d.get("nudge") and mode == "back":
             ov["back_dist"] = float(d.get("back_dist", 0.05))
+        elif mode == "turn":                       # [旋回] ボタン: 角度(正=左、負=右)
+            ov["turn_deg"] = float(d.get("turn_deg", 30.0))
         elif d.get("nudge"):
             ov["side_dir"] = d.get("side_dir", "left")
             ov["side_dist"] = float(d.get("side_dist", 0.05))
@@ -3679,7 +3681,7 @@ details .in{padding:0 12px 12px}
  </div>
  <div id="walkst" class="st">-</div>
  <details>
-  <summary>微調整（1歩・5cm）</summary>
+  <summary>微調整（1歩・5cm・旋回）</summary>
   <div class="in">
    <div class="st" style="margin:0 0 8px" id="stepinfo">-</div>
    <div class="g3">
@@ -3692,6 +3694,12 @@ details .in{padding:0 12px 12px}
     <button class="sm" onclick="nudge('right')">右へ5cm &#9654;</button>
    </div>
    <div class="st">10cm 以下は 1 歩ずつ、それ以上は普通の歩行。[1歩] は 1 歩だけ出して何 cm 動くかを見る。</div>
+   <div class="row" style="margin-top:10px"><label>旋回の角度 <input type="number" id="w_turn" value="30" min="5" max="180" step="5" style="width:64px"> °</label></div>
+   <div class="g2" style="margin-top:6px">
+    <button class="sm" onclick="turnGo('left')">&#8634; 左へ回る</button>
+    <button class="sm" onclick="turnGo('right')">右へ回る &#8635;</button>
+   </div>
+   <div class="st">その場で回ります（IMU のヨーで角度を測り、±3° で停止）。真横 0.5m 以内は LiDAR に映らないので、回る前に周りの空きを目で確認。</div>
   </div>
  </details>
 </section>
@@ -3747,6 +3755,7 @@ function walkGo(mode){
 function nudge(dir){cmd('walk_go',JSON.stringify({mode:'side',nudge:true,side_dir:dir,side_dist:0.05}))}
 function nudgeBack(m){cmd('walk_go',JSON.stringify({mode:'back',nudge:true,back_dist:m}))}
 function step1(dir){cmd('walk_go',JSON.stringify({mode:'step',dir:dir}))}
+function turnGo(dir){ const e=document.getElementById('w_turn'); let a=Math.abs(+(e&&e.value)||30); a=Math.min(180,Math.max(5,a)); if(e)e.value=a; cmd('walk_go',JSON.stringify({mode:'turn',turn_deg:(dir==='left'?a:-a)})) }
 function drawWall(w){
  const si=document.getElementById('stepinfo'); if(si) si.textContent='1歩≈'+(w.step_est_cm!=null?w.step_est_cm:'-')+'cm（前回 '+(w.step_last_cm!=null?w.step_last_cm:'-')+'cm、'+(w.steps||0)+'歩）';
  const sp=document.getElementById('w_speed'); if(sp&&w.params&&w.params.v_fwd!=null&&document.activeElement!==sp){ const t=String(+w.params.v_fwd); for(const o of sp.options){ if(String(+o.value)===t) sp.value=o.value; } }

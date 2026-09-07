@@ -91,6 +91,7 @@ WALK_DEFAULTS = dict(
     align_tol_deg=3.0,
     align_inplace_deg=8.0,  # これを超えていたらその場で回る。以下なら歩きながら合わせる
     om_turn=0.30,      # 正対の回転速度の上限[rad/s]
+    turn_deg=30.0,     # [旋回] の角度[deg]。正=左(反時計回り)、負=右。IMU のヨーで測って止める(2026-09-07)
     wall_track=True,   # 歩行中も壁の角度を測り続け、向きを壁に垂直へ寄せ続ける
     # ---- 障害物の回り込み(占有格子 + A* の経路探索。2026-09-07)
     avoid=True,
@@ -1758,6 +1759,51 @@ class AutoWalk:
         self.io["log"](f"正対しました(回転 {turned:+.1f}°、壁の角度 {ang if ang is None else round(ang, 1)}°)")
         return turned
 
+    def _turn_by(self, deg):
+        """その場で deg[度] 回る(正=左/反時計回り)。IMU のヨーで目標角を測り、align_tol_deg 以内が 3 回続いたら止める。
+        内蔵歩行は小さな回転指令に応じないので、指令は最低 0.15rad/s。戻り値: (回った角度[deg], 完了か)。
+        ★真横 0.5m 以内は LiDAR の死角なので、回る前の周囲の空きは操作者が目で確認する(2026-09-07)"""
+        p = self.p
+        tol = float(p.get("align_tol_deg", 3.0))
+        om_max = float(p.get("om_turn", 0.3))
+        yaw0 = self.io["yaw"]()
+        target = _wrap(yaw0 + math.radians(deg))
+        limit = max(10.0, abs(deg) / math.degrees(0.12) + 5.0)   # 0.12rad/s で回っても間に合う時間 + 5 秒
+        self.io["log"](f"旋回: {'左' if deg > 0 else '右'}へ {abs(deg):.0f}°(上限 {om_max:.2f}rad/s、許容 ±{tol:.0f}°)")
+        t0 = time.time()
+        ok_n = 0
+        om = 0.0
+        while True:
+            time.sleep(0.1)
+            self._sense()                          # 心拍・E-STOP・LiDAR の監視(_Abort はここから上がる)
+            err = _wrap(target - self.io["yaw"]())
+            if abs(err) <= math.radians(tol):
+                # 許容内に入ったら即ゼロ(最低指令 0.15rad/s を送り続けると 0.3 秒で 2.6° 行き過ぎる。モックで +3.5°)
+                ok_n += 1
+                self.io["vel"](0.0, 0.0, 0.0)
+                self.msg = f"旋回: 静定確認 {ok_n}/3(残り {math.degrees(err):+.1f}°)"
+                if ok_n >= 3:
+                    break
+                continue
+            ok_n = 0
+            if time.time() - t0 > limit:
+                self.io["vel"](0.0, 0.0, 0.0)
+                self._hold(0.8, "旋回: 静定")
+                turned = math.degrees(_wrap(self.io["yaw"]() - yaw0))
+                self.io["log"](f"★旋回の時間切れ({limit:.0f}秒): 回転 {turned:+.1f}°/{deg:+.0f}°")
+                return turned, False
+            om = float(np.clip(1.2 * err, -om_max, om_max))
+            if abs(om) < 0.15:
+                om = math.copysign(0.15, om)
+            self.io["vel"](0.0, 0.0, om)
+            self.msg = f"旋回中: 残り {math.degrees(err):+.1f}° 回転 {om:+.2f}rad/s"
+            self._rec(om=round(om, 3), yaw_err=round(math.degrees(err), 1))
+        self._hold(0.8, "旋回: 静定")
+        turned = math.degrees(_wrap(self.io["yaw"]() - yaw0))
+        self.io["log"](f"旋回しました(回転 {turned:+.1f}°、指定 {deg:+.0f}°)")
+        self.msg = ""
+        return turned, True
+
     # ---- 全体
     def _main(self):
         p = self.p
@@ -1770,7 +1816,7 @@ class AutoWalk:
         self._set_path(od)
         self.traveled_base = 0.0
         log(f"自動歩行 開始{'(ドライラン: 速度は送らない)' if dry else ''}"
-            f"[{ {'both': '前進→横移動', 'forward': '前進のみ', 'side': '横移動のみ', 'back': '後退', 'step': '1歩'}.get(mode, mode)}]: "
+            f"[{ {'both': '前進→横移動', 'forward': '前進のみ', 'side': '横移動のみ', 'back': '後退', 'step': '1歩', 'turn': '旋回'}.get(mode, mode)}]: "
             f"指令 上限{p['v_fwd']:.2f}/下限{p['cmd_min']:.2f}m/s 停止距離{p['stop_dist']:.2f}m "
             f"横{'左' if sdir > 0 else '右'}{p['side_dist']:.2f}m 最大前進{p['max_fwd']:.1f}m "
             f"回り込み{'あり' if p.get('avoid', True) else 'なし'}  点群座標系={obs.get('frame')}")
@@ -1778,6 +1824,14 @@ class AutoWalk:
             self.phase = "STEP"
             self.result = "完了: " + self._step_once(p.get("step_dir", "left"))
             log(f"自動歩行 {self.result}")
+            return
+        if mode == "turn":
+            self.phase = "TURN"
+            deg = float(p.get("turn_deg", 30.0))
+            turned, ok = self._turn_by(deg)
+            self.result = (f"完了: {'左' if deg > 0 else '右'}へ{abs(turned):.1f}°旋回(指定{abs(deg):.0f}°)" if ok
+                           else f"中止(TURN): 旋回{turned:+.1f}°/{deg:+.0f}°")
+            log(("自動歩行 " if ok else "★自動歩行 ") + self.result)
             return
         if mode == "back":
             self.phase = "BACK"
@@ -1857,7 +1911,7 @@ class WalkController:
               "tele_vx": (0.3, 0.9), "tele_vy": (0.3, 0.6), "tele_om": (0.1, 0.8),
               "half_w": (0.2, 0.6), "h_min": (0.05, 0.5), "h_max": (0.5, 2.5), "side_clear": (0.2, 1.5),
               "self_fwd": (0.1, 0.8), "self_lat": (0.2, 0.8), "yaw_fix_deg": (-360.0, 360.0), "front_offset": (-0.3, 0.5),
-              "align_tol_deg": (1.0, 15.0), "align_inplace_deg": (2.0, 45.0), "om_turn": (0.1, 0.6),
+              "align_tol_deg": (1.0, 15.0), "align_inplace_deg": (2.0, 45.0), "om_turn": (0.1, 0.6), "turn_deg": (-180.0, 180.0),
               "wall_width": (0.8, 3.0), "detour_margin": (0.02, 0.4), "body_half": (0.15, 0.45), "detour_max": (0.3, 3.0),
               "veer_v": (0.3, 0.9), "side_tol": (0.01, 0.1),
               "grid_res": (0.05, 0.15), "plan_dt": (0.1, 1.0), "look_m": (0.3, 1.5), "mem_s": (1.0, 10.0),
@@ -1896,7 +1950,7 @@ class WalkController:
             if k == "side_dir":
                 v = "left" if str(v) == "left" else "right"
             elif k == "mode":
-                v = str(v) if str(v) in ("both", "forward", "side", "back", "step") else "both"
+                v = str(v) if str(v) in ("both", "forward", "side", "back", "step", "turn") else "both"
             elif k == "step_dir":
                 v = str(v) if str(v) in ("left", "right", "back", "fwd") else "left"
             elif k == "detour_side":
@@ -2141,7 +2195,7 @@ class WalkController:
             tmp.det = self.det
             WalkController.set_params(tmp, overrides)
             self.det.cfg = dict(self.params)       # 検出器の設定は本体のまま
-        side_only = (params.get("mode", "both") in ("side", "back"))
+        side_only = (params.get("mode", "both") in ("side", "back", "turn"))
         lidar_ok = (t is not None and now - t <= 1.5)
         if od is None or now - od[0] > 0.8:
             self.log("★オドメトリが届いていません(rt/odommodestate)。"

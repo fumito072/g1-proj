@@ -406,6 +406,23 @@ def test_align():
     wc.close()
 
 
+def test_turn():
+    print("--- 5c. 指定角度の旋回(その場で +90° / −45°、IMU のヨーで止める) ---")
+    robot, tk, wc = _setup([dict(x=2.5, y=0.0, w=4.0, d=0.2, h=1.0)], dict(v_fwd=0.5, stop_dist=0.6))
+    wrap = lambda a: math.atan2(math.sin(a), math.cos(a))
+    for deg in (90.0, -45.0):
+        y0 = robot._wyaw
+        check(wc.start_auto(dict(mode="turn", turn_deg=deg)), f"旋回 開始({deg:+.0f}°)")
+        dt = _wait(wc, 60)
+        turned = math.degrees(wrap(robot._wyaw - y0))
+        print(f"    結果: {wc.auto.result}  回転 {turned:+.1f}°  所要{dt:.1f}秒")
+        check(wc.auto.result.startswith("完了") and abs(turned - deg) <= 4.0,
+              f"{deg:+.0f}° 回った(実測 {turned:+.1f}°、許容 ±4°)")
+        time.sleep(0.5)
+    tk.on = False
+    wc.close()
+
+
 def test_restart():
     print("--- 5c. 止まった後(歩行 FSM のまま)に、もう一度前進できる ---")
     robot, tk, wc = _setup([dict(x=2.0, y=0.0, w=4.0, d=0.2, h=1.0)],
@@ -449,6 +466,7 @@ if __name__ == "__main__":
     test_side()
     test_side_wall()
     test_align()
+    test_turn()
     test_restart()
     test_hb_loss()
     print("=" * 60)
