@@ -33,6 +33,10 @@ sys.path.insert(0, str(ROOT))
 from run_fsm import (Policy, ObsBuilder, quat_to_mat, ACTION_SCALE,   # noqa: E402
                      CONTROL_HZ, TILT_LIMIT_DEG, _yaw_of)
 from autowalk import WalkController                                    # noqa: E402
+try:
+    from back_climb import TopDetector                                 # noqa: E402  登り切った判定(2026-09-07)
+except Exception:                                                      # noqa: BLE001  (mujoco が無い環境でも起動できるように)
+    TopDetector = None
 from sit_shape import SagittalFK, shape_metrics, describe as shape_describe  # noqa: E402
 import base64                                                          # noqa: E402
 
@@ -258,7 +262,7 @@ CMD_ALLOW = (
     "walk_go", "sit_check", "sit_go", "hbdrop",              # かんたん画面と途絶の模擬
     "cfade",                                                 # 接触後の膝・足首の残差抜き
     "lidar_flip",                                            # LiDAR の前後を反転。lidar_mount.json に書く
-    "climb_check", "climb_go",                               # かんたん画面: 後ろ向き登りの点検と開始(2026-09-07)
+    "climb_check", "climb_go", "climbafter",                 # かんたん画面: 後ろ向き登りの点検と開始(2026-09-07)
 )
 CONTACT_FADE_MIN_T = 85           # 接触後フェードの検知を許す最初のコマ。参照の座面到達1.9秒の少し前
 SEAT_KT_MAX = 18.0                # 完了時: 終端0.5秒の両膝トルク中央値がこれ以上なら「脚に体重が残っている」
@@ -545,6 +549,12 @@ class Engine:
         self._beat_ignore_until = 0.0       # 途絶の模擬(hbdrop。シムでの手順確認用)
         self.sit_gate = None                # 着座前の確認(sit_check)の結果とトークン
         self.climb_gate = None              # 後ろ向き登り前の確認(climb_check)の結果とトークン(かんたん画面)
+        # ★登り切ったら内蔵のスタンドロック(FSM4)へ渡す(2026-09-07、操作者の提案)。方策の保持は学習で 1.4 秒まで
+        #   しか練習しておらず(元の記録: 段上 10 秒保持 1/8)、登った後はバランスを内蔵制御に任せる方が確実
+        self.climb_after = "stand"          # "stand"=登り切ったらスタンドロックへ / "hold"=方策で保持し続ける
+        self._top_det = (TopDetector() if TopDetector is not None else None)
+        self._climb_top = None
+        self._hold_frames = 0
         self._want_arm = False           # ワーカーの準備物をループが取り込む
         self._armed_bundle = None
         self._want_begin = None          # 開始するフェーズ番号
@@ -1242,7 +1252,8 @@ class Engine:
                       f"内蔵FSM {f}(立位/歩行/UserCtrlのどれか)" if f is not None else "内蔵FSM 読めず(simなど)"])
         try:
             with np.load(DEPLOY / name / "reference.npz") as z:
-                rq0 = np.asarray(z["ref_q"][0], dtype=float)
+                # ★立位開始で学習した方策(climb_back_S*)は ref_start_q(通常の立位)を比較先にする
+                rq0 = np.asarray(z["ref_start_q"] if "ref_start_q" in z.files else z["ref_q"][0], dtype=float)
                 rquat0 = np.asarray(z["ref_quat"][0], dtype=float)
             d = float(np.abs(q[:15] - rq0[:15]).max())
             items.append([d < 0.6, f"開始姿勢との差 {np.degrees(d):.0f}度(35度未満)" + ("" if d < 0.6 else
@@ -1765,6 +1776,10 @@ class Engine:
                 self.log(f"★LiDAR の反転に失敗: {e}")
         elif cmd == "walk_go":                     # かんたん画面: 前進 / 横歩き / 5cm
             self._spawn("歩行 開始", lambda a=arg: self._do_walk_go(a))
+        elif cmd == "climbafter":
+            if arg in ("stand", "hold"):
+                self.climb_after = arg
+                self.log("登り切った後: " + ("★スタンドロック(内蔵バランス)へ渡す(既定)" if arg == "stand" else "方策で保持し続ける(1.4秒までしか学習していない)"))
         elif cmd == "climb_check":                 # かんたん画面: 後ろ向き登り前の確認
             self._spawn("登り前の確認", self._do_climb_check)
         elif cmd == "climb_go":
@@ -1942,6 +1957,21 @@ class Engine:
             self._set_target(target, pol.kp, pol.kd, latch=(self.t == 0))
             self._rec(name, q, dq, quat, gyro, tau, obs, a, target)
             self.t += 1
+            if (_is_back_climb(pol) and self.climb_after == "stand" and self._climb_top is None
+                    and self._top_det is not None):
+                # 登り切った判定(back_climb.TopDetector): 両足の下の地形が段・骨盤 0.90m 超・傾き 12 度未満・静止、が 0.5 秒
+                try:
+                    top = self._top_det.update(self.obs_b, quat, gyro, dq, self.t)
+                except Exception as e:             # noqa: BLE001
+                    top = None
+                    if self.t % 100 == 0:
+                        self.log(f"登り切った判定に失敗: {e}")
+                if top is not None:
+                    self._climb_top = top
+                    self.log(f"登り切りました({top['t']}コマ={top['t'] / CONTROL_HZ:.1f}秒、推定骨盤 {top['z']:.2f}m、傾き {top['tilt']:.1f}度、"
+                             f"両足の下 {top['gz'][0]:.2f}/{top['gz'][1]:.2f}m、速さ {top['v']:.2f}m/s) — 方策を終えて内蔵のスタンドロックへ渡します")
+                    self._end_phase()
+                    return
             _lim = pol.n if self.stop_frame <= 0 else min(self.stop_frame, pol.n)
             if self.t >= _lim:
                 # ★参照npzは切らないこと。観測に正規化時刻 t/n と先読み
@@ -1969,6 +1999,27 @@ class Engine:
             self.obs_b.last_cmd = a.copy()
             self._set_target(pol.ref_q[ht] + self._scale_res(a) * pol.action_scale,
                              pol.kp, pol.kd)
+            self._hold_frames += 1
+            if (self.fsm == "HOLD" and _is_back_climb(pol) and self.climb_after == "stand"
+                    and self._climb_top is None and self._top_det is not None):
+                # ★保持中も登り切った判定を続ける。学習環境では判定の多くが参照の終端(261コマ)より後
+                #   (283〜289コマ: 段の上で骨盤が上がり切って静止するまで)に出る(eval_top.py、2026-09-07)
+                try:
+                    top = self._top_det.update(self.obs_b, quat, gyro, dq, self.t + self._hold_frames)
+                except Exception as e:             # noqa: BLE001
+                    top = None
+                    if self._hold_frames % 100 == 1:
+                        self.log(f"登り切った判定に失敗: {e}")
+                if top is not None:
+                    self._climb_top = top
+                    self.log(f"登り切りました(保持 {self._hold_frames / CONTROL_HZ:.1f}秒、推定骨盤 {top['z']:.2f}m、傾き {top['tilt']:.1f}度、"
+                             f"両足の下 {top['gz'][0]:.2f}/{top['gz'][1]:.2f}m、速さ {top['v']:.2f}m/s) — 内蔵のスタンドロックへ渡します(0.5秒後)")
+                    self._spawn("登り後 スタンドロック", lambda: self._do_after_phase("stand"))
+                elif self._hold_frames == int(3.0 * CONTROL_HZ):
+                    L = self._top_det.last or {}
+                    self.log("★保持 3 秒でも登り切った判定が出ません(推定骨盤 "
+                             f"{L.get('z', float('nan')):.2f}m、傾き {L.get('tilt', float('nan')):.1f}度、両足の下 {L.get('gz')}、速さ {L.get('v', float('nan')):.2f}m/s)"
+                             " — 方策で保持中(学習では 1.4 秒まで)。目視で [スタンドロック](段の上に居れば)か [ダンプ](支えて)を押してください")
         # simモックは論理時間で進める(壁時計非依存。実機は実時間)
         if self.is_sim and not getattr(self, "sim_frozen", False):
             self.robot.tick(10)
@@ -2354,6 +2405,10 @@ class Engine:
             self.robot.configure_physics(getattr(pol, "family", "gmt"))   # モックの衝突・摩擦を方策の学習環境に合わせる
         self._yaw_off_deg = float(np.degrees(yaw_off))
         self._lean_rad = (np.radians(float(self.sit_lean_deg)) if name.startswith("sit") else 0.0)
+        if self._top_det is not None:
+            self._top_det.reset()
+        self._climb_top = None
+        self._hold_frames = 0
         self.obs_b.pitch_bias = 0.0
         if self._lean_rad > 1e-9:
             self.log(f"重心を後ろへ: 観測の傾きを {self.sit_lean_deg:.0f} 度 前へ見せて座ります(1 秒でランプ)")
@@ -2650,6 +2705,13 @@ class Engine:
                 self.log(f"完了後の自動移行: {nm} へ渡します")
                 self._spawn(f"完了後 {nm}",
                             lambda n=self.after_phase: self._do_after_phase(n))
+            elif _is_back_climb(pol) and self.climb_after == "stand":
+                if self._climb_top is not None:
+                    self.log("登り後の自動移行: スタンドロック(FSM4、内蔵バランス)へ渡します(0.5秒後)")
+                    self._spawn("登り後 スタンドロック", lambda: self._do_after_phase("stand"))
+                else:
+                    self.log("終端に達しました。方策で保持しながら登り切った判定(段の上・直立・静止 0.5秒)を待ちます"
+                             "(出れば自動でスタンドロックへ。3 秒出なければ警告)")
 
     def _rec(self, name, q, dq, quat, gyro, tau, obs, a, target):
         """1コマを REC_COLS の並びで平坦な行にして積む(2026-08-24形式)。
@@ -2724,6 +2786,8 @@ class Engine:
                 "after_phase": self.after_phase,
             "sit_lean_deg": float(self.sit_lean_deg),
             "sim_pose": (self._sim_pose() if self.is_sim else None),
+            "climb_after": self.climb_after,
+            "climb_top": self._climb_top,
                 "arm_res": float(self.arm_res),
                 "arm_res_mode": self.arm_res_mode,
                 "leg_res": float(self.leg_res),
@@ -3654,7 +3718,7 @@ details .in{padding:0 12px 12px}
  <button class="go big" id="climb_btn" onclick="cmd('climb_check')">&#129700; 後ろ向きに段を登る（点検のあと 3 秒後に開始）</button>
  <div id="climbgate" class="gate" hidden>
   <div id="cgate_items"></div>
-  <div class="st" style="margin:4px 0">周囲に人がいないこと・ハーネスで支えていること・リモコンの E-STOP を握っていることを見てから。点検に × が無ければ 3 秒後に、着座と同じ手順で制御権を取ってすぐ登り始めます（約 5 秒）。登り切ったら方策が立位を保持します。降ろすときは支えてから [ダンプ]。</div>
+  <div class="st" style="margin:4px 0">周囲に人がいないこと・ハーネスで支えていること・リモコンの E-STOP を握っていることを見てから。点検に × が無ければ 3 秒後に、着座と同じ手順で制御権を取ってすぐ登り始めます（約 5 秒）。登り切った（両足が段の上・直立・静止が 0.5 秒）ら方策を終え、内蔵のスタンドロックにバランスを任せます。</div>
   <div class="g2"><button class="go" id="cgate_go" onclick="climbGo()" disabled>登りを開始（3秒後）</button><button onclick="climbCancel()">やめる</button></div>
   <div id="cgate_cd" class="st"></div>
  </div>

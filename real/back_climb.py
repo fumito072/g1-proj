@@ -310,3 +310,39 @@ class BackClimbObs:
             [load_ratio],
         ]).astype(np.float32)
         return obs
+
+
+class TopDetector:
+    """登り切った判定(2026-09-07、操作者の提案)。方策の「保持」は学習で 1.4 秒までしか練習していない
+    (元の記録: 段上 10 秒保持 1/8)ので、登り切ったら方策を終えて内蔵のスタンドロック(FSM4)にバランスを任せる。
+    条件(すべて満たす状態が n_hold コマ続いたら成立):
+      t >= t_min / 両足の下の地形 > gz_min(段の上、床は 0) / 推定骨盤高さ > z_min / 傾き < tilt_max 度 /
+      角速度 < gyro_max rad/s / 推定した骨盤速度 < v_max m/s
+    ※関節速度は使わない: 方策の保持は関節が細かく震える(RMS 1.0〜1.5rad/s)ので静止の指標にならない(学習環境で確認)
+    学習環境(climb_back_B、参照開始、20回)で検証: back_climb_retrain_20260907/eval_top.py"""
+
+    def __init__(self, t_min=100, n_hold=25, gz_min=0.15, z_min=0.90, tilt_max=15.0, gyro_max=0.6, v_max=0.15):
+        self.t_min, self.n_hold = int(t_min), int(n_hold)
+        self.gz_min, self.z_min, self.tilt_max = float(gz_min), float(z_min), float(tilt_max)
+        self.gyro_max, self.v_max = float(gyro_max), float(v_max)
+        self.reset()
+
+    def reset(self):
+        self.n = 0
+        self.last = None
+
+    def update(self, obs_b, quat, gyro, dq, t):
+        """成立した瞬間に dict(t, z, tilt, gz, v) を返す(それ以外は None)。obs_b は BackClimbObs(dq は未使用)"""
+        gz = np.asarray(obs_b.ground_z, dtype=float)
+        pz = float(obs_b.est.p[2])
+        v = float(np.linalg.norm(np.asarray(obs_b.est.v, dtype=float)))
+        up_z = float(_quat_to_mat(np.asarray(quat, dtype=float))[2, 2])
+        tilt = float(np.degrees(np.arccos(min(1.0, max(-1.0, up_z)))))
+        ok = (t >= self.t_min and float(gz.min()) > self.gz_min and pz > self.z_min
+              and tilt < self.tilt_max and float(np.linalg.norm(gyro)) < self.gyro_max and v < self.v_max)
+        self.n = self.n + 1 if ok else 0
+        self.last = dict(t=int(t), z=round(pz, 3), tilt=round(tilt, 1), gz=[round(float(g), 3) for g in gz],
+                         v=round(v, 3), n=self.n)
+        if self.n >= self.n_hold:
+            return dict(self.last)
+        return None
