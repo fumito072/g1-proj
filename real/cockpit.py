@@ -3396,10 +3396,10 @@ section{background:var(--card);border:1px solid var(--line);border-radius:14px;p
 section h2{font-size:12px;color:var(--t2);letter-spacing:.1em;text-transform:uppercase;margin-bottom:10px;display:flex;align-items:center;gap:8px}
 section h2 span{font-size:12px;font-weight:600;letter-spacing:0;text-transform:none;margin-left:auto}
 .g3{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
-.g3 button{font-size:15px;padding:12px 4px}
+.g3 button{font-size:14px;padding:12px 4px;letter-spacing:-.01em}
 .g2{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
 .row{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;margin:0 0 10px;font-size:14px;color:var(--t2)}
-.row label{display:inline-flex;align-items:center;gap:6px;color:var(--t1);max-width:100%;min-width:0}
+.row label{display:inline-flex;align-items:center;gap:6px;color:var(--t1);max-width:100%;min-width:0;white-space:nowrap}
 .row label.grow{flex:1 1 100%}
 #sel_sit{flex:1 1 auto;min-width:0;max-width:100%;text-overflow:ellipsis}
 button{font:inherit;border-radius:12px;border:1px solid var(--line2);background:#fff;color:var(--t1);padding:12px 8px;min-height:54px;cursor:pointer;font-weight:700;-webkit-tap-highlight-color:transparent;box-shadow:0 1px 0 rgba(16,24,40,.04)}
