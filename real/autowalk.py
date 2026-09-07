@@ -80,7 +80,7 @@ WALK_DEFAULTS = dict(
     half_w=0.35,       # 進行方向の帯の半幅[m](この中の点を障害物とみなす)
     h_min=0.12,        # 障害物とみなす高さ帯[m](床から)
     h_max=1.80,
-    side_clear=0.45,   # 横移動中、進行方向にこの距離未満で点があれば止まる[m]
+    side_clear=0.35,   # 横歩き: 目標位置の先にこれだけ空いていること[m](体の半幅 0.25 + 余白)。掃く帯に占有があれば手前で止まる
     self_fwd=0.40,     # 自分の体(頭のLiDARの真下〜腕)を除く範囲: 前方この距離まで[m]
     self_lat=0.50,     # 同・左右この幅まで[m]
     yaw_fix_deg=0.0,   # センサ座標の点群に足すヨー[deg](lidar_mount.json の値 − ブリッジが適用済みの値)。[前後を反転]で±180
@@ -104,7 +104,7 @@ WALK_DEFAULTS = dict(
     grid_res=0.08,     # 占有格子の刻み[m]
     plan_dt=0.30,      # 経路探索の間隔[s]
     look_m=0.45,       # 経路の先読み距離[m](この先の点へ向かう速度ベクトルを出す。長いと角を内側に切る)
-    mem_s=4.0,         # 占有格子が点を覚えている時間[s](自分の体の陰に入った脇の物を忘れない)
+    mem_s=8.0,         # 占有格子が点を覚えている時間[s](自分の体の陰(左右 0.5m)に入った脇の物を、横歩きまで忘れない)
     lam_e=0.5,         # 経路線 e=0 から離れることの罰(1 歩あたり、1m につき)。通り過ぎたらこれで戻る
     lam_side=4.0,      # 優先しない側(detour_side の反対)に 15cm 超入ることの罰(1 歩あたり、一定)。優先側に経路が無いときだけ反対側を通る
 )
@@ -112,7 +112,8 @@ WALK_FSMS = {200, 500, 501}        # 速度指令を受ける内蔵FSM(loco)。8
 YAW_KP = 1.6                       # 直進保持のゲイン[(rad/s)/rad](旧コックピット実績値)
 YAW_OM_MAX = 0.30                  # 直進保持の補正上限[rad/s]
 SEND_HZ = 10.0                     # 速度送信の周期
-LIDAR_STALE_S = 0.8                # 点群がこれ以上古ければ前進を中止(0.8秒 = 巡航で約20cm)
+LIDAR_STALE_S = 0.8                # 点群がこれ以上古ければ止まって待つ(0.8秒 = 巡航で約20cm)
+LIDAR_ABORT_S = 3.0                # これ以上古いままなら前進を中止(2026-09-07: 0.8 秒の途切れ 1 回で回り込み成功後の前進が中止された)
 CMD_HOLD_S = 0.5                   # 指令の有効期間。これを過ぎたらゼロを送る
 TILT_ABORT_DEG = 25.0              # 歩行中にこれを超えたら自動歩行を止める
 SENSOR_FWD_OFFSET = 0.10           # センサ座標の点群を使うときのセンサ→骨盤の前方オフセット[m]
@@ -980,6 +981,7 @@ class AutoWalk:
 
     # ---- 経路線とセンサ
     def _set_path(self, od):
+        self._map = None                           # 経路座標が変わるので占有格子は作り直す
         self._x0, self._y0 = od[1], od[2]
         yaw_od = od[3]
         self._fx, self._fy = math.cos(yaw_od), math.sin(yaw_od)
@@ -1006,7 +1008,14 @@ class AutoWalk:
         if od is None or now - od[0] > 0.8:
             raise _Abort(f"中止({self.phase}): オドメトリ途絶")
         if self.need_lidar and (obs_t is None or now - obs_t > LIDAR_STALE_S):
-            raise _Abort(f"中止({self.phase}): LiDAR途絶({LIDAR_STALE_S:.1f}秒)")
+            age = None if obs_t is None else now - obs_t
+            if age is None or age > LIDAR_ABORT_S:
+                raise _Abort(f"中止({self.phase}): LiDAR途絶({LIDAR_ABORT_S:.1f}秒)")
+            # 短い途切れは止まって待つ(呼び出し側は ok=False で速度ゼロにして次のコマへ)
+            if now - getattr(self, "_t_stale_log", 0.0) > 5.0:
+                self._t_stale_log = now
+                self.io["log"](f"LiDAR の点群が {age:.1f} 秒古い — 止まって待ちます(最長 {LIDAR_ABORT_S:.0f} 秒)")
+            obs = dict(ok=False, why=f"LiDAR 途絶 {age:.1f}秒(止まって待つ)")
         if not self.need_lidar and (obs_t is None or now - obs_t > LIDAR_STALE_S):
             obs = dict(ok=False, why="LiDAR無し")
         self._obs_t = obs_t
@@ -1068,15 +1077,55 @@ class AutoWalk:
         v = min(b, a + float(self.p["slew_up"]) * dt) if b > a else max(b, a - float(self.p["slew_down"]) * dt)
         return sgn * max(cm, v)
 
-    def _side_clear_m(self, obs, sgn):
-        """横歩きのときの「その側の空き」[m]。真横(side_free)と斜め前(side_fwd)の近い方。
-        ★真横は自分の体の除外(|lat| < self_lat)で見えないことが多い。無いとは言えない(操作者の目が必要)"""
-        if not obs.get("ok"):
-            return None
-        a = obs.get("side_free_l" if sgn > 0 else "side_free_r")
-        b = obs.get("side_fwd_l" if sgn > 0 else "side_fwd_r")
-        c = [x for x in (a, b) if x is not None]
-        return min(c) if c else None
+    def _ensure_map(self):
+        """占有格子(PathMap)。前進・横歩きで共用。経路線を張り直したら作り直す"""
+        p = self.p
+        if self._map is None:
+            e_max = max(float(p["detour_max"]), float(p.get("side_dist", 0.5))) + 0.6
+            self._map = PathMap(res=float(p["grid_res"]), s_min=-1.0, s_max=float(p["max_fwd"]) + 2.0, e_max=e_max,
+                                body_half=float(p["body_half"]), margin=float(p["detour_margin"]),
+                                mem_s=float(p["mem_s"]))
+        return self._map
+
+    def _feed_map(self, obs, od, now):
+        """点群(体基準)を経路座標に回して占有格子へ書く。★点群が更新されたコマだけ呼ぶ"""
+        pts = obs.get("pts") if obs.get("ok") else None
+        if pts is None or len(pts) == 0:
+            return
+        s, e = self._pose(od)
+        psi = _wrap(od[3] - math.atan2(self._fy, self._fx))
+        c, sn = math.cos(psi), math.sin(psi)
+        se = np.empty((len(pts), 2), np.float64)
+        se[:, 0] = s + pts[:, 0] * c - pts[:, 1] * sn
+        se[:, 1] = e + pts[:, 0] * sn + pts[:, 1] * c
+        self._ensure_map().add(se, now)
+
+    def _lateral_blocked(self, s, e, e_target, sgn, now):
+        """横歩きで体が掃く帯(前後 −0.45〜+0.30m × いまの位置+0.10m 〜 目標+side_clear)に占有があるか。
+        戻り値 (塞がっているか, いちばん手前の占有までの横距離[m] or None)。
+        ★2026-09-07: 以前は「斜め前 0.45〜1.2m の点」も見ていたので、壁の手前 0.6m に立つと正面の壁で
+          横歩きが押した瞬間に中止していた。真横 |lat|<0.5 は自分の体の除外で見えないので、格子の記憶
+          (前進中に見た脇の物)で補う。それでも真横の物は操作者が目で見る前提"""
+        lm = self._map
+        if lm is None:
+            return False, None
+        occ = lm.occupied(now)
+        e_far = e_target + sgn * float(self.p["side_clear"])
+        if sgn * (e_far - e) <= 0.10:
+            return False, None
+        i0, _j = lm.cell(s - 0.45, 0.0)
+        i1, _j = lm.cell(s + 0.30, 0.0)
+        _i, j0 = lm.cell(0.0, e + sgn * 0.10)
+        _i, j1 = lm.cell(0.0, e_far)
+        ja, jb = min(j0, j1), max(j0, j1)
+        cols = occ[i0:i1 + 1, ja:jb + 1].any(axis=0)
+        if not cols.any():
+            return False, None
+        js = np.nonzero(cols)[0] + ja
+        j_near = int(js.min()) if sgn > 0 else int(js.max())
+        rows_hit = np.nonzero(occ[i0:i1 + 1, j_near])[0] + i0
+        self._blk_cell = (round(lm.coord(int(rows_hit[0]), j_near)[0], 2), round(lm.coord(0, j_near)[1], 2), int(len(js)))
+        return True, abs(lm.coord(0, j_near)[1] - e)
 
     def _lidar_dist(self, obs):
         """前方の残り距離の元(LiDAR)。帯の中の最近点と、壁の面(幅が壁幅の 8 割以上)の近い方"""
@@ -1208,10 +1257,8 @@ class AutoWalk:
         stall_t = time.time()
         avoid = bool(p.get("avoid", True))
         side_pref = {"left": 1, "right": -1}.get(str(p.get("detour_side", "left")), 0)
-        e_max = float(p["detour_max"]) + 0.6
-        lm = self._map = PathMap(res=float(p["grid_res"]), s_min=-1.0, s_max=float(p["max_fwd"]) + 2.0, e_max=e_max,
-                                 body_half=float(p["body_half"]), margin=float(p["detour_margin"]),
-                                 mem_s=float(p["mem_s"]))
+        self._map = None
+        lm = self._ensure_map()
         plan = None                                 # dict(pts=[(s,e)...], reached, t, seen, n, ms)
         t_plan = 0.0
         passing = None                              # いま回り込んでいる物 dict(s_far, side, t0, e_out)
@@ -1251,13 +1298,7 @@ class AutoWalk:
                     self.v_meas = 0.7 * self.v_meas + 0.3 * ((d_prev - d_now) / max(0.05, now - t_dprev))
                 d_prev, t_dprev = d_now, now
                 obs_t_prev = self._obs_t
-                pts = obs.get("pts")
-                if avoid and pts is not None and len(pts):
-                    c, sn = math.cos(psi), math.sin(psi)
-                    se = np.empty((len(pts), 2), np.float64)
-                    se[:, 0] = s + pts[:, 0] * c - pts[:, 1] * sn
-                    se[:, 1] = e + pts[:, 0] * sn + pts[:, 1] * c
-                    lm.add(se, now)
+                self._feed_map(obs, od, now)
             # --- 経路探索: 前 3m に何かある / 回り込み中 / 経路線からずれている とき、plan_dt ごと
             s_max_path = float(p["max_fwd"]) - self.traveled_base
             need = avoid and ((dist is not None and dist < 3.0) or passing is not None or abs(e) > 0.10)
@@ -1449,12 +1490,18 @@ class AutoWalk:
         t_prev = t0
         c = 0.0
         hist = []
+        target0 = target
+        obs_t_prev = None
+        self._feed_map(obs, od, t0)
         while True:
             time.sleep(0.1)
             now = time.time()
             dt = max(0.02, min(0.3, now - t_prev))
             t_prev = now
             od, obs = self._sense()
+            if self._obs_t is not None and self._obs_t != obs_t_prev:
+                obs_t_prev = self._obs_t
+                self._feed_map(obs, od, now)
             s, e = self._pose(od)
             self.offset = e
             if axis == "s":
@@ -1462,23 +1509,34 @@ class AutoWalk:
             x = s if axis == "s" else e
             rem = (target - x) * sgn
             hist.append((now, x))
+            if axis == "e":
+                # 掃く帯に占有があれば、その手前(side_clear)までに目標を縮める(縮めるだけ。戻さない)
+                blk, d_blk = self._lateral_blocked(s, e, target, sgn, now)
+                if blk:
+                    t_new = e + sgn * max(0.0, (d_blk or 0.0) - float(p["side_clear"]))
+                    if sgn * (t_new - target) < 0:
+                        target = t_new
+                        rem = (target - x) * sgn
+                        bc = getattr(self, "_blk_cell", None)
+                        self.io["log"](f"{label}: 横{d_blk:.2f}mに占有(格子 s={bc[0]} e={bc[1]}、{bc[2]}列) — "
+                                       f"{abs(target - x0) * 100:.0f}cm までにします")
+                    self.msg = f"{label}: 横{d_blk:.2f}mに障害物 — {abs(target - x0) * 100:.0f}cm まで"
             # 実速度(オドメトリの 0.3 秒の差)× 応答遅れ move_lag ぶん手前で止め始める(速いほど惰性で進む)
             old = [xx for tt, xx in hist if tt <= now - 0.3]
             v_est = abs(x - old[-1]) / max(0.3, now - [tt for tt, xx in hist if tt <= now - 0.3][-1]) if old else 0.0
             if rem <= tol + v_est * float(p.get("move_lag", 0.3)):
+                short = sgn * (target0 - target) > tol
+                if short and abs(target - x0) <= tol and c <= 0.0:
+                    self.io["vel"](0.0, 0.0, 0.0)
+                    self.msg = f"{label}: 掃く帯に障害物 — 動きません"
+                    return False
                 self.phase = "STOPPING"
                 self._stop_and_settle(label)
-                return True
+                return not short
             if now - t0 > t_limit:
                 self.io["vel"](0.0, 0.0, 0.0)
                 raise _Abort(f"中止({self.phase}): 時間切れ({t_limit:.0f}秒、残り{rem * 100:+.0f}cm)")
-            if axis == "e":
-                sf = self._side_clear_m(obs, sgn)
-                if sf is not None and sf < float(p["side_clear"]):
-                    self.io["vel"](0.0, 0.0, 0.0)
-                    self.msg = f"{label}: 横{sf:.2f}mに障害物 — 止めます"
-                    return False
-            elif sgn > 0:
+            if axis == "s" and sgn > 0:
                 d_front = obs.get("dist") if obs.get("ok") else None
                 if d_front is not None and d_front < float(p["stop_dist"]) + 0.05:
                     self.io["vel"](0.0, 0.0, 0.0)
@@ -1529,10 +1587,11 @@ class AutoWalk:
                 self._hold(0.5, f"{label}: 半歩未満の残り{rem * 100:+.0f}cm は追いません")
                 return True
             if axis == "e":
-                sf = self._side_clear_m(obs, sgn)
-                if sf is not None and sf < float(p["side_clear"]):
+                self._feed_map(obs, od, time.time())
+                blk, d_blk = self._lateral_blocked(s, e, target if not single else e + sgn * 0.10, sgn, time.time())
+                if blk:
                     self.io["vel"](0.0, 0.0, 0.0)
-                    self.msg = f"{label}: 横{sf:.2f}mに障害物 — 止めます"
+                    self.msg = f"{label}: 横{d_blk:.2f}mに障害物 — 止めます"
                     return False
             elif sgn > 0:                            # 前向きの 1 歩は停止距離を守る
                 d_front = obs.get("dist") if obs.get("ok") else None
@@ -1583,8 +1642,12 @@ class AutoWalk:
         od, _obs = self._sense()
         _s, e = self._pose(od)
         if abs(e_target - e) <= self.NUDGE_MAX + 1e-6:
-            return self._step_axis("e", e_target, label)
-        return self._move_axis("e", e_target, label)
+            ok = self._step_axis("e", e_target, label)
+        else:
+            ok = self._move_axis("e", e_target, label)
+        od, _obs = self._sense()                   # 静止後の位置で offset を更新(惰性ぶんを表示に反映)
+        _s, self.offset = self._pose(od)
+        return ok
 
     def _back_to(self, dist, label):
         od, _obs = self._sense()

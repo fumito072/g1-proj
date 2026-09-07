@@ -364,6 +364,31 @@ def test_side():
     wc.close()
 
 
+def test_side_wall():
+    print("--- 5a. 壁の手前 0.6m で横歩き(2026-09-07 実機: 正面の壁で『横方向に障害物』になり動かなかった) ---")
+    # 壁は前面が x=0.65(幅 4m)。右へ 1.0m
+    robot, tk, wc = _setup([dict(x=0.75, y=0.0, w=4.0, d=0.2, h=1.0)],
+                           dict(v_side=0.5, mode="side", side_dir="right", side_dist=1.0))
+    st = wc.status()
+    print(f"    開始時: 前方 {st['dist']}m 真横 左{st['side_free_l']}/右{st['side_free_r']} 斜め前 左{st['side_fwd_l']}/右{st['side_fwd_r']}")
+    check(wc.start_auto(), "横歩き 右 1.0m 開始")
+    dt = _wait(wc, 90)
+    print(f"    結果: {wc.auto.result}  y={robot._wy:.3f}  所要{dt:.1f}秒")
+    check(wc.auto.result.startswith("完了") and abs(robot._wy + 1.0) < 0.10,
+          f"壁の手前でも右へ 1.0m 歩けた: y={robot._wy:+.3f} (期待 -1.00±0.10)")
+    wc.close()
+    print("--- 5a-2. 右 0.9m に椅子(幅 0.4m)があるときの右へ 1.0m → 椅子の手前で止まる ---")
+    robot, tk, wc = _setup([dict(x=0.75, y=0.0, w=4.0, d=0.2, h=1.0), dict(x=0.0, y=-0.9, w=0.4, d=0.4, h=0.9)],
+                           dict(v_side=0.5, mode="side", side_dir="right", side_dist=1.0))
+    check(wc.start_auto(), "横歩き 右 1.0m 開始(椅子あり)")
+    dt = _wait(wc, 90)
+    print(f"    結果: {wc.auto.result}  y={robot._wy:.3f}  所要{dt:.1f}秒")
+    # 椅子の近い端 y=-0.7。体の半幅 0.25 + 余白 0.10 = 0.35 手前(y≈-0.35)までなら OK
+    check(wc.auto.result.startswith("中止") and -0.45 < robot._wy < -0.05,
+          f"椅子の手前で止まった: y={robot._wy:+.3f} (期待 -0.45〜-0.05、椅子の端 -0.70)")
+    wc.close()
+
+
 def test_align():
     print("--- 5b. 斜めの壁: 最初に回転して正対してから前進 ---")
     robot, tk, wc = _setup([dict(x=2.5, y=0.0, w=4.0, d=0.2, h=1.0)],
@@ -422,6 +447,7 @@ if __name__ == "__main__":
     test_detour_blocked()
     test_detour_two()
     test_side()
+    test_side_wall()
     test_align()
     test_restart()
     test_hb_loss()
