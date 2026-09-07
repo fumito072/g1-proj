@@ -20,6 +20,9 @@ Environment=HOME=/home/unitree MUJOCO_GL=disable PYTHONUNBUFFERED=1
 # ★ログインシェル(~/.bashrc)と同じ DDS の設定。無いと cyclonedds が既定設定で動く(2026-09-04 午後に判明)
 Environment=CYCLONEDDS_URI=/home/unitree/cyclonedds_ws/cyclonedds.xml RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 Environment=LD_LIBRARY_PATH=/usr/local/lib:/usr/local/cuda-11.4/lib64
+# PyTorch/BLAS のスレッドを 1 本に(2026-09-07: 待機中に torch の 7 スレッドが 60〜70% ずつ空回りして 4.6 コアを食い、
+#   LiDAR 判定スレッドが 1 秒に 1 回しか回れず「LiDAR 途絶 0.8 秒」で前進が中止された。方策は小さな MLP で 1 本で足りる)
+Environment=OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 TORCH_NUM_THREADS=1
 LimitNOFILE=8192
 Nice=-5
 # 1) 競合する lowcmd 送信源を止める(+ は root で実行)
