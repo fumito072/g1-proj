@@ -324,7 +324,9 @@ PATTERN_NOTES = {
     "sit_r2":                 "後傾24度・右ロール17度(記録用。姿勢に癖)",
     "sit_patternA_recline24": "後傾24度・右ロール17度(記録用。姿勢に癖)",
     # --- 登り / 旋回
-    "climb_slow_r2":  "慎重に登る版。登りはこれから",
+    "climb_slow_r2":  "慎重に登る版(前向き)。登りはこれから",
+    "climb_back_B":   "★後ろ向きに段0.21mを登って直立静止。段階B(押し外乱つき)95%。観測183次元・脚kp400。実機未検証・ハーネス必須",
+    "climb_back_A":   "後ろ向き登り 段階A(外乱なし)100%。B の比較用",
     "climb_r2":       "標準速の登り",
     "turn_wide_r2":   "ワイドスタンス旋回",
     "turn_fine_r2":   "細かい旋回",
@@ -342,7 +344,7 @@ PATTERN_WARN = {
 def list_patterns():
     out = {"climb": [], "turn": [], "sit": []}
     for d in sorted(DEPLOY.iterdir()):
-        if not (d / "policy.pt").exists():
+        if not ((d / "policy.pt").exists() or (d / "policy.npz").exists()):
             continue
         n = d.name
         if n.startswith("climb"):
@@ -352,6 +354,18 @@ def list_patterns():
         elif n.startswith("sit"):
             out["sit"].append(n)
     return out
+
+
+def make_obs_builder(pol, robot=None):
+    """方策の系統に合った観測の組み立て器。蒸留済み(615次元)は ObsBuilder、後ろ向き登り(183次元)は BackClimbObs"""
+    if getattr(pol, "family", "") == "back_climb":
+        from back_climb import BackClimbObs
+        return BackClimbObs(pol, robot)
+    return ObsBuilder(pol)
+
+
+def _is_back_climb(pol):
+    return getattr(pol, "family", "") == "back_climb"
 
 
 def default_pattern(task, fallback="(skip)"):
@@ -860,12 +874,13 @@ class Engine:
         if not phases:
             self.log("★全て(skip)です。パターンを選んでください")
             return
-        obs_b = ObsBuilder(phases[0][1])
+        obs_b = make_obs_builder(phases[0][1], self.robot)
         # 開始は自然な両足立位から(climb系の参照fr0は片脚立ちだが、
         # 蒸留済み方策は両足立位スタートでも完走する。10/10で実測)
+        # ★後ろ向き登り(climb_back_*)の参照 fr0 は両足立位なので climb_stand は使わない
         sp = ROOT / "motions" / "climb_stand.npz"
         stand = dict(np.load(sp)) if (
-            sp.exists() and phases[0][0].startswith("climb")) else None
+            sp.exists() and phases[0][0].startswith("climb") and not _is_back_climb(phases[0][1])) else None
         log_dir = self._session_dir()
         self._armed_bundle = dict(phases=phases, obs_b=obs_b, stand=stand,
                                   log_dir=log_dir, single_task=None,
@@ -993,9 +1008,9 @@ class Engine:
         self._clear_estop(f"UserCtrl→{name}")
         # 1) 重い準備を先に(制御権を取ってからやるとその間ずっと沈む)
         pol = Policy(name)
-        obs_b = ObsBuilder(pol)
+        obs_b = make_obs_builder(pol, self.robot)
         sp = ROOT / "motions" / "climb_stand.npz"
-        stand = (dict(np.load(sp)) if task == "climb" and sp.exists() else None)
+        stand = (dict(np.load(sp)) if task == "climb" and sp.exists() and not _is_back_climb(pol) else None)
         log_dir = self._session_dir()
         self.log(f"方策 {name} を読み込みました。UserCtrl へ入ります")
         # 2) UserCtrl 進入(方策のゲインでラッチする)
@@ -1252,12 +1267,15 @@ class Engine:
             #   ので何もしない。かんたん画面の [スタンドロック]→[着座の確認]→着座 を
             #   シムで通すため(2026-09-04)
             try:
+                # ★後ろ向き登り(climb_back_*)を選んでいるときは、その参照の開始位置(床の上・段の手前)に置く
                 name_sit = self.sel.get("sit", "(skip)")
-                if name_sit != "(skip)":
-                    with np.load(DEPLOY / name_sit / "reference.npz") as z:
+                name_climb = self.sel.get("climb", "(skip)")
+                name_pl = name_climb if str(name_climb).startswith("climb_back") else name_sit
+                if name_pl != "(skip)":
+                    with np.load(DEPLOY / name_pl / "reference.npz") as z:
                         self.robot.place(z["ref_q"][0], z["ref_quat"][0],
                                          z["ref_xy_abs"][0][:2], float(z["ref_z"][0]))
-                    self.log(f"(sim) {name_sit} の参照開始位置に立位で配置しました")
+                    self.log(f"(sim) {name_pl} の参照開始位置に立位で配置しました")
             except Exception as e:                 # noqa: BLE001
                 self.log(f"(sim) 参照開始位置への配置に失敗: {e}")
 
@@ -1382,9 +1400,9 @@ class Engine:
             return
         self._clear_estop(f"開始姿勢へ {name}")
         pol = Policy(name)
-        obs_b = ObsBuilder(pol)
+        obs_b = make_obs_builder(pol, self.robot)
         sp = ROOT / "motions" / "climb_stand.npz"
-        stand = (dict(np.load(sp)) if task == "climb" and sp.exists() else None)
+        stand = (dict(np.load(sp)) if task == "climb" and sp.exists() and not _is_back_climb(pol) else None)
         log_dir = self._session_dir()
         if not self.robot.custom_active:
             if not self._handover(pol):
@@ -1426,9 +1444,9 @@ class Engine:
         # バランスが取れず体幹が傾く(実測: 合計3秒で37度傾き、
         # 開始直後に自動DAMP。references/handover.md §3)
         pol = Policy(self.sel[task])
-        obs_b = ObsBuilder(pol)
+        obs_b = make_obs_builder(pol, self.robot)
         sp = ROOT / "motions" / "climb_stand.npz"
-        stand = (dict(np.load(sp)) if task == "climb" and sp.exists() else None)
+        stand = (dict(np.load(sp)) if task == "climb" and sp.exists() and not _is_back_climb(pol) else None)
         log_dir = self._session_dir()
         # ★準備物はここでは self へ入れない。HOLD中は直前フェーズの方策が
         #   self.obs_b でバランスを取っている。途中で差し替えると、保持中の
@@ -1761,7 +1779,7 @@ class Engine:
             q, dq, quat, gyro, tau = self.robot.state()
             _ti = time.perf_counter()
             self.obs_b.pitch_bias = float(getattr(self, "_lean_rad", 0.0)) * min(1.0, (self.t + 1) / (1.0 * CONTROL_HZ))
-            obs = self.obs_b.build(pol, self.t, q, dq, quat, gyro)
+            obs = self.obs_b.build(pol, self.t, q, dq, quat, gyro, tau=tau, acc=self._imu_accel())
             a = pol.act(obs)
             self._ms_infer = (time.perf_counter() - _ti) * 1000.0
             # ★NaNは指令にしない。観測(IMU/エンコーダ)か方策が壊れた合図で、
@@ -1849,7 +1867,7 @@ class Engine:
             ht = int(getattr(self, "hold_t", pol.n - 1))
             ht = max(0, min(ht, pol.n - 1))
             q, dq, quat, gyro, tau = self.robot.state()
-            obs = self.obs_b.build(pol, ht, q, dq, quat, gyro)
+            obs = self.obs_b.build(pol, ht, q, dq, quat, gyro, tau=tau, acc=self._imu_accel())
             a = pol.act(obs)
             if not (np.all(np.isfinite(obs)) and np.all(np.isfinite(a))):
                 self._nan_frames += 1
@@ -2146,6 +2164,24 @@ class Engine:
                 c[name] = None
         return c[name]
 
+    def _sim_pose(self):
+        """モックの骨盤の高さと足の高さ(確認用)"""
+        try:
+            import mujoco
+            d = self.robot.d
+            fz = [float(d.xpos[mujoco.mj_name2id(self.robot.m, mujoco.mjtObj.mjOBJ_BODY, n)][2])
+                  for n in ("left_ankle_roll_link", "right_ankle_roll_link")]
+            return dict(z=round(float(d.qpos[2]), 3), xy=[round(float(v), 3) for v in d.qpos[0:2]], feet_z=[round(v, 3) for v in fz])
+        except Exception:                          # noqa: BLE001
+            return None
+
+    def _imu_accel(self):
+        f = getattr(self.robot, "imu_accel", None)
+        try:
+            return None if f is None else f()
+        except Exception:                          # noqa: BLE001
+            return None
+
     def _set_target(self, q, kp, kd, latch=False):
         """robot.set_target のラッパ。**拒否されたら黙らせない。**"""
         ok, why = self.robot.set_target(q, kp, kd, latch=latch)
@@ -2222,6 +2258,10 @@ class Engine:
         _kw = (dict(quat=quat, ref_quat=pol.ref["ref_quat"][0])
                if self.yaw_align else {})
         yaw_off = self.obs_b.reset(est_xy=pol.ref["ref_xy_abs"][0][:2], **_kw)
+        if hasattr(pol, "reset"):
+            pol.reset()                            # 行動ローパスの状態を捨てる(後ろ向き登り)
+        if self.is_sim and hasattr(self.robot, "configure_physics"):
+            self.robot.configure_physics(getattr(pol, "family", "gmt"))   # モックの衝突・摩擦を方策の学習環境に合わせる
         self._yaw_off_deg = float(np.degrees(yaw_off))
         self._lean_rad = (np.radians(float(self.sit_lean_deg)) if name.startswith("sit") else 0.0)
         self.obs_b.pitch_bias = 0.0
@@ -2511,7 +2551,10 @@ class Engine:
                          "方策で保持中。目視で確認して [ダンプ] か [スタンドロック] を押す")
             # 完了後に標準モードへ自動で渡す(操作者が選んだときだけ)。
             # ★50Hzループの中でRPCを呼ばないこと。_spawn でワーカーに出す。
-            if self.after_phase in ("seated", "sit", "damp") and not self._seat_doubt:
+            # ★2026-09-07: 自動移行は着座方策で終わったときだけ。登り(段の上で立位)や旋回の後に
+            #   着座(FSM3)やダンプへ渡すと、段の上で内蔵制御が別の姿勢を取りに行く
+            if (self.after_phase in ("seated", "sit", "damp") and not self._seat_doubt
+                    and str(name).startswith("sit")):
                 nm = {"seated": "着座(FSM3)", "sit": "スクワット(FSM2)",
                       "damp": "ダンプ"}[self.after_phase]
                 self.log(f"完了後の自動移行: {nm} へ渡します")
@@ -2590,6 +2633,7 @@ class Engine:
                 "stop_frame": int(self.stop_frame),
                 "after_phase": self.after_phase,
             "sit_lean_deg": float(self.sit_lean_deg),
+            "sim_pose": (self._sim_pose() if self.is_sim else None),
                 "arm_res": float(self.arm_res),
                 "arm_res_mode": self.arm_res_mode,
                 "leg_res": float(self.leg_res),

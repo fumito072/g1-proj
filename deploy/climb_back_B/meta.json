@@ -1,0 +1,15 @@
+{
+ "tag": "climb_back_B",
+ "family": "back_climb",
+ "motion": "back_climb",
+ "obs_dim": 183,
+ "act_dim": 29,
+ "trained_steps": 2621440,
+ "onnx": false,
+ "exec_hi": 260,
+ "stage": "B",
+ "pass_rate": 95.0,
+ "source": "G1_後ろ向き段差登り_一式/04_学習結果/numpy版_実機用/policy_back_climb_best_B.npz (2026-08-21)",
+ "obs_layout": "G1_後ろ向き段差登り_一式 06_コード/4_学習/rl/motion_env.py _observe (183次元、履歴なし)",
+ "notes": "後ろ向きに段(0.21m)を登って直立静止。脚 kp400/kd12・腕腰 kp70/kd2.5(学習値)。行動ローパス0.5、残差0.7rad。区間0〜260で学習、260で凍結して保持"
+}

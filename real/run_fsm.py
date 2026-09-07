@@ -71,19 +71,30 @@ class Policy:
     """deploy/<name>/ の TorchScript 方策と参照データ"""
 
     def __init__(self, name):
-        import torch
         d = DEPLOY / name
         self.name = name
-        self.net = torch.jit.load(str(d / "policy.pt")).eval()
-        # ★暖機(2026-09-04): TorchScript の最初の推論はプロファイル実行で 120〜270ms かかる(実機ログ)。
-        #   走行の1コマ目で払わず、読込のここで済ませておく
-        try:
-            _nin = int(json.loads((d / "meta.json").read_text(encoding="utf-8")).get("obs_dim", 615))
-        except Exception:                          # noqa: BLE001
-            _nin = 615
-        with torch.no_grad():
-            for _ in range(4):
-                self.net(torch.zeros(1, _nin))
+        self.family = "gmt"                        # "gmt"=蒸留済み TorchScript(615次元) / "back_climb"=後ろ向き登り(numpy、183次元)
+        self.exec_hi = None
+        self._act_f = None
+        if (d / "policy.pt").exists():
+            import torch
+            self.net = torch.jit.load(str(d / "policy.pt")).eval()
+            # ★暖機(2026-09-04): TorchScript の最初の推論はプロファイル実行で 120〜270ms かかる(実機ログ)。
+            #   走行の1コマ目で払わず、読込のここで済ませておく
+            try:
+                _nin = int(json.loads((d / "meta.json").read_text(encoding="utf-8")).get("obs_dim", 615))
+            except Exception:                          # noqa: BLE001
+                _nin = 615
+            with torch.no_grad():
+                for _ in range(4):
+                    self.net(torch.zeros(1, _nin))
+        elif (d / "policy.npz").exists():
+            # 後ろ向き段差登り(G1_後ろ向き段差登り_一式)。PyTorch 不要の numpy MLP。行動は 0.5 のローパス
+            from back_climb import NumpyPolicy
+            self.net = NumpyPolicy(d / "policy.npz")
+            self.family = "back_climb"
+        else:
+            raise FileNotFoundError(f"{d} に policy.pt も policy.npz も無い")
         # ★zipは読み切って閉じる(遅延読み込みのまま制御ループへ渡さない)。
         #   理由は _Ref のコメントを参照。
         with np.load(d / "reference.npz") as _z:
@@ -95,6 +106,10 @@ class Policy:
         self.n = len(self.ref_q)
         self.meta = json.loads((d / "meta.json").read_text())
         self.ref = z                               # ref_quat/ref_xy_abs/ref_z等
+        if self.family == "back_climb":
+            # 学習した区間の終端で凍結して保持する(それ以降は未知の観測。元の実験: 素通し 0/10、凍結 9/10)
+            self.exec_hi = int(z["exec_hi"]) if "exec_hi" in z.files else self.n - 1
+            self.n = min(self.n, self.exec_hi + 1)
         # ★関節ごとの残差スケール(2026-09-02の配布から)。
         #   target = ref_q + action * scale_v で、学習時と同じ幅にする。
         #   ln20系は腕14関節が0.2、脚腰が0.7。**これを読まないと腕が
@@ -108,7 +123,16 @@ class Policy:
             self.action_scale = np.full(29, sc, dtype=float)
             self.has_scale_v = False
 
+    def reset(self):
+        """フェーズ開始時に呼ぶ(行動ローパスの状態を捨てる)"""
+        self._act_f = None
+
     def act(self, obs):
+        if self.family == "back_climb":
+            a = np.clip(self.net.act(obs), -1.0, 1.0)
+            from back_climb import ACT_BETA
+            self._act_f = a if self._act_f is None else ACT_BETA * self._act_f + (1.0 - ACT_BETA) * a
+            return self._act_f.astype(np.float64)
         import torch
         with torch.no_grad():
             a = self.net(torch.as_tensor(obs, dtype=torch.float32)[None])
@@ -227,8 +251,8 @@ class ObsBuilder:
                 d.xpos[self.fid[1]].copy() - base,
                 d.subtree_com[self.com_bid].copy() - base)
 
-    def build(self, pol, t, q, dq, quat, gyro):
-        """観測を作る。全て実機で取れる量のみ。
+    def build(self, pol, t, q, dq, quat, gyro, tau=None, acc=None):
+        """観測を作る。全て実機で取れる量のみ。(tau/acc は後ろ向き登り用の引数。ここでは使わない)
 
         素の方策は 205×履歴3 = 615次元。接触観測つきの方策(ContactMimic系)は
         各フレームの末尾に参照側の接触スケジュール10次元が付き、215×3 = 645次元。

@@ -172,6 +172,51 @@ class SimRobot:
             tau = self.d.ctrl[self.acts].copy()
         return q, dq, quat, gyro, tau
 
+    def configure_physics(self, family):
+        """方策の系統に合わせてモックの衝突・摩擦を切り替える(2026-09-07)。
+        "back_climb": 後ろ向き登りの学習環境と同じ設定 — 脚・胴は環境とも自分同士とも当たる、腕は自分同士だけ、
+                      椅子・床は環境側、摩擦 0.85、condim 4。既定(自己衝突なし・摩擦 1.0)では登り切れない
+                      (同じ目標を流した 200 コマの比較で差、閉ループ 3/8 → 学習環境どおりで 6/8)
+        それ以外: 読み込み時の設定に戻す"""
+        import mujoco
+        m = self.m
+        if not hasattr(self, "_phys0"):
+            self._phys0 = {f: getattr(m, f).copy() for f in ("geom_contype", "geom_conaffinity", "geom_condim", "geom_friction")}
+        if family != "back_climb":
+            for f, v in self._phys0.items():
+                getattr(m, f)[:] = v
+            return
+        chair_bid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "chair")
+        BIT_ENV, BIT_SELF = 1, 2
+        for g in range(m.ngeom):
+            bid = int(m.geom_bodyid[g])
+            name = mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, bid) or ""
+            if not (self._phys0["geom_contype"][g] or self._phys0["geom_conaffinity"][g]) and bid != chair_bid \
+                    and m.geom_type[g] != mujoco.mjtGeom.mjGEOM_PLANE and m.geom_group[g] == 2:
+                continue                           # 見た目だけの geom はそのまま
+            if bid == chair_bid or m.geom_type[g] == mujoco.mjtGeom.mjGEOM_PLANE:
+                m.geom_contype[g] = BIT_ENV
+                m.geom_conaffinity[g] = BIT_ENV
+            elif any(k in name for k in ("shoulder", "elbow", "wrist")):
+                m.geom_contype[g] = BIT_SELF
+                m.geom_conaffinity[g] = BIT_SELF
+            else:
+                m.geom_contype[g] = BIT_ENV | BIT_SELF
+                m.geom_conaffinity[g] = BIT_ENV | BIT_SELF
+            m.geom_condim[g] = max(int(m.geom_condim[g]), 4)
+            m.geom_friction[g, 0] = 0.85
+            m.geom_friction[g, 1] = (2.0 / 3.0) * 0.02 * 0.85
+
+    def imu_accel(self):
+        """加速度計の模擬: 体幹原点の世界加速度 + 重力 を体幹座標へ(実機の imu_state.accelerometer と同じ意味)"""
+        with self.lock:
+            w, x, y, z = [float(v) for v in self.d.qpos[3:7]]
+            a_w = self.d.qacc[0:3].copy()
+        R = np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+                      [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+                      [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)]])
+        return R.T @ (a_w + np.array([0.0, 0.0, 9.81]))
+
     def set_target(self, q, kp, kd, latch=False):
         """実機と同じガードを掛ける(NaN拒否・可動域・変化量)。
         実機だけで発動するガードは、モックで手順を練習する意味がなくなる。"""

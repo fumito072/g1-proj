@@ -1121,6 +1121,11 @@ class RealRobot:
         with self.lock:
             return self.temps.copy()
 
+    def imu_accel(self):
+        """IMU の加速度計[m/s²、体幹座標、重力込み](後ろ向き登りの脚オドメトリが使う)"""
+        with self.lock:
+            return self.accel.copy()
+
     def state_full(self):
         """記録用に、LowStateから取れるものを全部返す(コピー)。
 
