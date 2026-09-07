@@ -260,17 +260,20 @@ def rollout_replay(sim, real, kp, kd):
     return out
 
 
-def rollout_policy(sim, real, kp, kd, policy_name):
-    """同じ開始姿勢から、方策をシムの中で閉ループで回す"""
+def rollout_policy(sim, real, kp, kd, policy_name, pitch_bias_deg=0.0, bias_ramp_s=1.0):
+    """同じ開始姿勢から、方策をシムの中で閉ループで回す。
+    pitch_bias_deg: 観測の体の向きを前へ倒して見せる(コックピットの「重心を後ろへ」と同じ。1 秒でランプ)"""
     from run_fsm import ACTION_SCALE, ObsBuilder, Policy
     pol = Policy(policy_name)
     ob = ObsBuilder(pol)
     ob.reset(est_xy=pol.ref["ref_xy_abs"][0][:2])
     sim.place(real["q"][0], real["quat"][0])
     out = []
+    nr = max(1, int(bias_ramp_s * 50))
     for t in range(min(real["n"], pol.n)):
         s = sim.read()
         gyro = sim.d.qvel[3:6].copy()
+        ob.pitch_bias = np.radians(pitch_bias_deg) * min(1.0, (t + 1) / nr)
         obs = ob.build(pol, t, s["q"], s["dq"], s["quat"], gyro)
         a = pol.act(obs)
         ob.last_cmd = a.copy()
@@ -398,6 +401,8 @@ def main():
     ap.add_argument("--mode", default="step",
                     choices=("step", "policy", "replay"))
     ap.add_argument("--plot", action="store_true")
+    ap.add_argument("--pitch-bias-deg", type=float, default=0.0,
+                    help="policy モード: 観測の体の向きを前へ倒して見せる角度(コックピットの「重心を後ろへ」の A/B 用)")
     a = ap.parse_args()
 
     # ★実機の操縦中に走らせない。2026-08-26 11:40 に、このツールを回した
@@ -461,7 +466,7 @@ def main():
             continue
         sim = Sim(name)
         if a.mode == "policy":
-            out = rollout_policy(sim, real, kp, kd, name)
+            out = rollout_policy(sim, real, kp, kd, name, pitch_bias_deg=a.pitch_bias_deg)
         elif a.mode == "step":
             out = rollout_step(sim, real, kp, kd)
         else:

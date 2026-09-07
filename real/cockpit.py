@@ -484,6 +484,10 @@ class Engine:
         # ★2026-09-04 午後: 既定を元の "seated"(内蔵の着座 FSM3)へ戻した。9/3 14:20〜14:52 の 8 本が
         #   FSM3 自動移行で運用されて問題なし(逆に "damp" は浅く座った機体を前へ崩す)
         self.after_phase = "seated"
+        # ★重心の後ろ寄せ(2026-09-07): 着座方策の観測の「体の向き」をこの角度ぶん前へ倒して見せる。
+        #   方策は前に傾いていると判断して上体と重心を後ろへ寄せる(実機 09:57/09:58: 骨盤が足首の 10〜14cm
+        #   後ろ、脛が参照より 25 度前傾、上体前傾 26 度で「前に倒れそう」)。開始 1 秒でランプ。着座方策だけ
+        self.sit_lean_deg = 8.0
         self.obs_b = None
         self.log_dir = None
         self.logs = []
@@ -1585,6 +1589,13 @@ class Engine:
                             if self.stop_frame else "最後まで走ります(既定)"))
             except Exception:                      # noqa: BLE001
                 self.log(f"★打ち切りコマ数が不正: {arg}")
+        elif cmd == "sitlean":
+            try:
+                self.sit_lean_deg = max(0.0, min(15.0, float(arg)))
+                self.log(f"重心を後ろへ: 着座中の観測の傾きを {self.sit_lean_deg:.0f} 度 前へ見せます"
+                         + ("(しない)" if self.sit_lean_deg < 0.5 else " — 方策が上体と重心を後ろへ寄せます"))
+            except Exception:                      # noqa: BLE001
+                self.log(f"★重心の後ろ寄せの指定が不正: {arg}")
         elif cmd == "afterphase":
             if arg in ("none", "seated", "sit", "damp"):
                 self.after_phase = arg
@@ -1749,6 +1760,7 @@ class Engine:
                            else (_now - self._rec_prev_t) * 1000.0)
             q, dq, quat, gyro, tau = self.robot.state()
             _ti = time.perf_counter()
+            self.obs_b.pitch_bias = float(getattr(self, "_lean_rad", 0.0)) * min(1.0, (self.t + 1) / (1.0 * CONTROL_HZ))
             obs = self.obs_b.build(pol, self.t, q, dq, quat, gyro)
             a = pol.act(obs)
             self._ms_infer = (time.perf_counter() - _ti) * 1000.0
@@ -2211,6 +2223,10 @@ class Engine:
                if self.yaw_align else {})
         yaw_off = self.obs_b.reset(est_xy=pol.ref["ref_xy_abs"][0][:2], **_kw)
         self._yaw_off_deg = float(np.degrees(yaw_off))
+        self._lean_rad = (np.radians(float(self.sit_lean_deg)) if name.startswith("sit") else 0.0)
+        self.obs_b.pitch_bias = 0.0
+        if self._lean_rad > 1e-9:
+            self.log(f"重心を後ろへ: 観測の傾きを {self.sit_lean_deg:.0f} 度 前へ見せて座ります(1 秒でランプ)")
         if not self.yaw_align:
             self.log(f"★ヨー合わせOFF のまま開始します"
                      f"(実測は参照より{self._yaw_err_deg()}度ずれています)")
@@ -2286,6 +2302,7 @@ class Engine:
             "assist": self.assist,
             "stop_frame": int(self.stop_frame),
             "after_phase": self.after_phase,
+            "sit_lean_deg": float(self.sit_lean_deg),
             "arm_res": float(self.arm_res),
             "arm_res_mode": self.arm_res_mode,
             "leg_res": float(self.leg_res),
@@ -2572,6 +2589,7 @@ class Engine:
                 "assist": self.assist,
                 "stop_frame": int(self.stop_frame),
                 "after_phase": self.after_phase,
+            "sit_lean_deg": float(self.sit_lean_deg),
                 "arm_res": float(self.arm_res),
                 "arm_res_mode": self.arm_res_mode,
                 "leg_res": float(self.leg_res),
@@ -2828,6 +2846,20 @@ table.st td{text-align:right;padding:3px 6px;border-top:1px solid var(--line);wh
    「前へならえ」に寄る。<br>
    ★観測に入る値は縮めない(学習時と同じ意味を保つ)ので、方策の判断自体は変わらない。
    ★0.00でも腕は動く(参照の軌道どおりに動く)</div>
+  <div class="row">重心を後ろへ
+   <select id="sel_lean" onchange="cmd('sitlean',this.value)">
+    <option value="0">しない(観測は実測どおり)</option>
+    <option value="4">4 度</option>
+    <option value="6">6 度</option>
+    <option value="8" selected>★8 度 — 既定</option>
+    <option value="10">10 度</option>
+   </select></div>
+  <div class="lbl">着座方策が見る<b>体の傾き</b>だけを、この角度ぶん「前に傾いている」ように見せる(開始 1 秒でランプ)。
+   方策は前に倒れまいとして上体と重心を後ろへ寄せる。実測(足の高さ・関節・傾きの中止判定)は変えない。
+   2026-09-07 の実機 2 本: 骨盤が足首の 10〜14cm 後ろ・脛が参照より 25 度前傾・上体が最大 26 度前傾で
+   「前に倒れそう」だったための調整。シム(参照の開始姿勢・今日の実機 2 本の開始姿勢、各 0〜10 度、転倒なし):
+   下降中の前傾 最大 24→16 度(参照開始)/ 33→22 度(浅く座る回)、終端の上体 −6→−17 度(後ろ)、座面荷重 86→171N。
+   大きくすると後ろ(椅子側)へ倒れやすくなる。</div>
   <div class="row">完了後
    <select id="sel_after" onchange="cmd('afterphase',this.value)">
     <option value="seated">★着座(FSM3)へ渡す — 既定</option>
@@ -3155,6 +3187,7 @@ async function tick(){
  document.getElementById('sel_assist').value=d.assist||'?';
  document.getElementById('sel_stop').value=String(d.stop_frame||0);
  document.getElementById('sel_after').value=d.after_phase||'none';
+ if(d.sit_lean_deg!==undefined){document.getElementById('sel_lean').value=String(Math.round(d.sit_lean_deg));}
  document.getElementById('sel_armres').value=(d.arm_res===undefined?1:d.arm_res).toFixed(1);
  const lr=document.getElementById('sel_legres'); if(lr){const v=(d.leg_res===undefined?1:d.leg_res); lr.value=(v>=0.999?'1.0':(Math.abs(v-0.85)<0.01?'0.85':(Math.abs(v-0.7)<0.01?'0.7':'0.6')));}
  const cf=document.getElementById('sel_cfade'); if(cf&&d.contact_fade)cf.value=d.contact_fade;

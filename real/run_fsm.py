@@ -162,6 +162,7 @@ class ObsBuilder:
         self.contact_dim = int(extra.get("contact_dim", 0))
         self.reset()
 
+        self.pitch_bias = 0.0        # 観測に足す体のピッチ[rad]。+ で「前に傾いている」ように見せる → 方策が重心を後ろへ寄せる(2026-09-07)
     def reset(self, est_xy=(0.0, 0.0), quat=None, ref_quat=None):
         """フェーズ開始時に呼ぶ。est_xy には**そのフェーズの参照開始位置**
         (pol.ref['ref_xy_abs'][0])を渡すこと。ロボットを参照開始位置に
@@ -238,6 +239,13 @@ class ObsBuilder:
         # ヨー合わせ後の向き。obsに入る「体の向き」と脚オドメトリの積分だけ
         # こちらを使う。体幹基準の量(R.T @ …)はヨー回転で不変なので生のRのまま
         Ra = self.Rz @ R
+        # ★重心の後ろ寄せ(2026-09-07): 観測の「体の向き」だけ、体の左右軸まわりに pitch_bias ぶん前へ倒して見せる。
+        #   方策は「前に傾いている」と判断して上体と重心を後ろへ寄せる。足の高さ・脚オドメトリ・体幹基準の量は
+        #   実測のまま(IMU のオフセット誤差と同じ種類のずれで、方策はこれに頑健)
+        Ra_obs = Ra
+        if abs(float(self.pitch_bias)) > 1e-9:
+            cb, sb = np.cos(float(self.pitch_bias)), np.sin(float(self.pitch_bias))
+            Ra_obs = Ra @ np.array([[cb, 0.0, sb], [0.0, 1.0, 0.0], [-sb, 0.0, cb]])
         z = pol.ref
         n = pol.n
         t = min(t, n - 1)
@@ -262,7 +270,7 @@ class ObsBuilder:
         xy_off = z["ref_xy_abs"][t][:2] - self.est_xy   # TODO: AprilTag導入時は置換
         obs = np.concatenate([
             [h_rel - h_rel_ref],
-            Ra[:2].reshape(-1),
+            Ra_obs[:2].reshape(-1),
             v_est * 0.3,
             gyro * 0.2,
             q,
