@@ -177,6 +177,8 @@ def _setup(boxes, params, hb_ok=True, log=None):
     tk = _Ticker(robot)
     wc = WalkController(robot, log=log or _log, hb_ok=lambda: hb_ok, is_sim=True)
     wc.set_params(params)
+    if os.environ.get("G1_TEST_LOGDIR"):            # 1 コマごとの記録(walk_*.jsonl)を残したいとき
+        wc.log_dir = os.environ["G1_TEST_LOGDIR"]
     check(wc.prepare(), "歩行モードへ(4→501)")
     time.sleep(0.6)
     return robot, tk, wc
@@ -223,30 +225,96 @@ def test_wall():
     wc.close()
 
 
+def _clearance(tk, box):
+    """箱の横を通っている間(x が箱の範囲±0.25)の、体の中心から箱の端までの最小距離[m]。通っていなければ None"""
+    xs = np.array([h[1] for h in tk.hist]); ys = np.array([h[2] for h in tk.hist])
+    near = (xs > box["x"] - box["d"] / 2 - 0.25) & (xs < box["x"] + box["d"] / 2 + 0.25)
+    if not near.any():
+        return None, None
+    dy = ys[near] - box["y"]
+    k = int(np.argmin(np.abs(dy)))
+    return float(np.abs(dy).min() - box["w"] / 2), float(dy[k])
+
+
 def test_detour():
-    print("--- 4. 障害物の回り込み(幅0.6mの箱 → 元の経路へ → 壁の手前で停止) ---")
-    boxes = [dict(x=1.8, y=0.0, w=0.6, d=0.3, h=1.0),      # 障害物(箱)
-             dict(x=4.5, y=0.0, w=4.0, d=0.2, h=1.0)]      # その先の壁
+    print("--- 4. 障害物の回り込み(幅0.6mの箱 → 左を通る → 元の経路へ → 壁の手前で停止) ---")
+    box = dict(x=1.8, y=0.0, w=0.6, d=0.3, h=1.0)
+    boxes = [box, dict(x=4.5, y=0.0, w=4.0, d=0.2, h=1.0)]      # 障害物(箱)とその先の壁
     robot, tk, wc = _setup(boxes, dict(v_fwd=0.5, stop_dist=0.6, mode="forward",
                                        max_fwd=8.0, avoid=True))
     st = wc.status()
-    check(st["dist"] is not None and st["wall"] is False and
-          (st["free_l"] is not None or st["free_r"] is not None),
-          f"開始時: 障害物 {st['dist']}m 幅{st['width']} 回り込み先 左{st['free_l']}/右{st['free_r']}")
+    check(st["dist"] is not None and st["wall"] is False,
+          f"開始時: 障害物 {st['dist']}m 幅{st['width']} 壁判定={st['wall']}")
     check(wc.start_auto(), "前進 開始")
     dt = _wait(wc, 180)
     tk.on = False
     res = wc.auto.result
     print(f"    結果: {res}  x={robot._wx:.2f} y={robot._wy:.2f} 回り込み{wc.auto.detours}回  所要{dt:.1f}秒")
     check(res.startswith("完了") and wc.auto.detours == 1, "回り込み1回で完了した")
-    check(abs(robot._wy) < 0.10, f"元の経路へ戻った(横ずれ y={robot._wy:+.3f} 期待±0.10)")
+    check(abs(robot._wy) < 0.2, f"元の経路へ戻った(横ずれ y={robot._wy:+.3f} 期待±0.2)")
     check(abs(robot._wx - (4.5 - 0.1 - 0.6)) < 0.3, f"壁の手前で停止 x={robot._wx:.2f} (期待3.80±0.3)")
-    # 箱の横を通っている間(x が箱の範囲)、体の中心は箱の端+肩幅 以上離れているか
-    xs = np.array([h[1] for h in tk.hist]); ys = np.array([h[2] for h in tk.hist])
-    near = (xs > 1.8 - 0.15 - 0.25) & (xs < 1.8 + 0.15 + 0.25)
-    if near.any():
-        clearance = np.abs(ys[near]).min() - 0.3
-        check(0.05 < clearance < 0.42, f"箱の横をギリギリで通る: 最小クリアランス {clearance:.2f}m (期待 0.05〜0.42 = 体の半幅0.25+余白0.08+行き過ぎ)")
+    cl, side = _clearance(tk, box)
+    check(cl is not None and 0.05 < cl < 0.45 and side > 0,
+          f"箱の左をギリギリで通る: 最小クリアランス {cl}m 側={side} (期待 0.05〜0.45・左=正)")
+    wc.close()
+
+
+def test_detour_wide():
+    print("--- 4b. 幅1.3mの箱(横へ1m寄る必要がある。2026-09-07 の実機の物)を左から回り込む ---")
+    box = dict(x=2.2, y=0.0, w=1.3, d=0.3, h=1.0)
+    boxes = [box, dict(x=4.6, y=0.0, w=6.0, d=0.2, h=1.0),
+             dict(x=2.3, y=2.5, w=0.2, d=7.0, h=1.0), dict(x=2.3, y=-2.5, w=0.2, d=7.0, h=1.0)]   # 左右の壁
+    robot, tk, wc = _setup(boxes, dict(v_fwd=0.5, stop_dist=0.6, mode="forward", max_fwd=8.0, avoid=True))
+    check(wc.start_auto(), "前進 開始")
+    dt = _wait(wc, 180)
+    tk.on = False
+    res = wc.auto.result
+    print(f"    結果: {res}  x={robot._wx:.2f} y={robot._wy:.2f} 回り込み{wc.auto.detours}回  所要{dt:.1f}秒")
+    check(res.startswith("完了") and wc.auto.detours == 1, "回り込み1回で完了した")
+    check(abs(robot._wx - (4.6 - 0.1 - 0.6)) < 0.3, f"壁の手前で停止 x={robot._wx:.2f} (期待3.90±0.3)")
+    check(abs(robot._wy) < 0.2, f"元の経路へ戻った(横ずれ y={robot._wy:+.3f} 期待±0.2)")
+    cl, side = _clearance(tk, box)
+    check(cl is not None and 0.05 < cl < 0.45 and side > 0,
+          f"箱の左を通る: 最小クリアランス {cl}m 側={side} (期待 0.05〜0.45・左=正)")
+    wc.close()
+
+
+def test_detour_blocked():
+    print("--- 4c. 幅1.3mの箱の両脇が 0.35m しか空いていない(体が通らない) → 手前で止まる ---")
+    box = dict(x=2.0, y=0.0, w=1.3, d=0.3, h=1.0)
+    boxes = [box, dict(x=2.0, y=1.05, w=0.1, d=6.0, h=1.0), dict(x=2.0, y=-1.05, w=0.1, d=6.0, h=1.0),
+             dict(x=4.5, y=0.0, w=2.0, d=0.2, h=1.0)]
+    robot, tk, wc = _setup(boxes, dict(v_fwd=0.5, stop_dist=0.6, mode="forward", max_fwd=8.0, avoid=True))
+    check(wc.start_auto(), "前進 開始")
+    dt = _wait(wc, 120)
+    tk.on = False
+    res = wc.auto.result
+    print(f"    結果: {res}  x={robot._wx:.2f} y={robot._wy:.2f} 回り込み{wc.auto.detours}回  所要{dt:.1f}秒")
+    check(res.startswith("完了") and wc.auto.detours == 0, "回り込まずに完了した")
+    check(abs(robot._wx - (2.0 - 0.15 - 0.6)) < 0.3, f"箱の手前で停止 x={robot._wx:.2f} (期待1.25±0.3)")
+    check(abs(robot._wy) < 0.25, f"横へ逃げていない(y={robot._wy:+.3f})")
+    wc.close()
+
+
+def test_detour_two():
+    print("--- 4d. 箱が 2 つ(右寄りと左寄りに互い違い) → 両方を回り込んで壁の手前で止まる ---")
+    b1 = dict(x=1.8, y=-0.3, w=0.7, d=0.3, h=1.0)
+    b2 = dict(x=3.4, y=0.45, w=0.7, d=0.3, h=1.0)
+    boxes = [b1, b2, dict(x=5.6, y=0.0, w=6.0, d=0.2, h=1.0),
+             dict(x=2.5, y=2.5, w=0.2, d=8.0, h=1.0), dict(x=2.5, y=-2.5, w=0.2, d=8.0, h=1.0)]
+    robot, tk, wc = _setup(boxes, dict(v_fwd=0.5, stop_dist=0.6, mode="forward", max_fwd=8.0, avoid=True))
+    check(wc.start_auto(), "前進 開始")
+    dt = _wait(wc, 240)
+    tk.on = False
+    res = wc.auto.result
+    print(f"    結果: {res}  x={robot._wx:.2f} y={robot._wy:.2f} 回り込み{wc.auto.detours}回  所要{dt:.1f}秒")
+    check(res.startswith("完了") and wc.auto.detours >= 1, "回り込んで完了した")
+    check(abs(robot._wx - (5.6 - 0.1 - 0.6)) < 0.3, f"壁の手前で停止 x={robot._wx:.2f} (期待4.90±0.3)")
+    check(abs(robot._wy) < 0.2, f"元の経路へ戻った(横ずれ y={robot._wy:+.3f} 期待±0.2)")
+    c1, _s1 = _clearance(tk, b1)
+    c2, _s2 = _clearance(tk, b2)
+    check(c1 is not None and c1 > 0.05 and c2 is not None and c2 > 0.05,
+          f"どちらの箱にも当たらない(クリアランス {c1} / {c2})")
     wc.close()
 
 
@@ -350,6 +418,9 @@ if __name__ == "__main__":
     test_deadman()
     test_wall()
     test_detour()
+    test_detour_wide()
+    test_detour_blocked()
+    test_detour_two()
     test_side()
     test_align()
     test_restart()

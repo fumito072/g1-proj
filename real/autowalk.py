@@ -15,12 +15,13 @@
   AutoWalk         前進 / 回り込み / 横歩き の状態機械(スレッド)
   WalkController   上の全部をまとめてコックピット(Engine)へ1つの入口で見せる
 
-前進の速さ(2026-09-04): 壁までの残り距離に応じて段階的に落とし、最後は忍び足で止まる
-  残り ≥1.5m 100% / 1.0〜1.5m 80% / 0.6〜1.0m 55% / 0.25〜0.6m 35% / 0〜0.25m 15%(最低0.08m/s)
-  さらに加減速に上限(加速0.3・減速0.6 m/s²)を掛けて滑らかにする
-回り込み: 前方の物体が「壁」(横幅1.4m超、または両側とも1m以上)でなく、左右どちらかに
-  体が通る幅(物体の端+肩幅+余裕)が空いていれば、そちらへ横移動 → 物体の奥まで前進 →
-  元の経路線へ横移動して戻り → 前進を続ける(オドメトリで経路線を保持)
+前進の速さ(2026-09-04 夜): 指令 = k·(LiDAR の残り距離 − 停止距離) を [cmd_min, v_fwd] に収める。
+  残りが stop_lead 以下で指令ゼロ → fsm_mode==0(静止)を待つ。FSM は切り替えない
+回り込み(2026-09-07): 点群を経路座標(s,e)の占有格子(8cm、4 秒記憶)に写し、体の半幅で膨らませて
+  A* で「前方 4.4m 先(か最大前進距離)」までの経路を探す。経路が帯の中の物の奥まで届けば
+  その物では止まらず、経路の 0.6m 先の点へ向かう速度ベクトルを出して脇を通る(左を優先)。
+  届かなければ(壁・部屋いっぱいの物)今までどおり LiDAR の距離で手前に止まる。
+  経路線 e=0 から離れると 1 歩ごとに罰があるので、通り過ぎたら自然に経路線へ戻る
 横歩き: 0.5秒進んで0.4秒止まる「足踏みパルス」を繰り返し、残り距離に応じて歩幅を縮める
   (到達許容2cm)。5cm刻みの微調整にも同じ経路を使う
 
@@ -53,7 +54,9 @@ WALK_DEFAULTS = dict(
     cmd_min=0.30,      # 動かすときの指令の下限[m/s]。★これ未満は足踏みだけで進まない(実測: 0.20→0.04m/s)。止めるときは 0
     k_dist=0.90,       # 前進: 指令 = k × (LiDAR の距離 − 停止距離)[m/s per m]。1m 手前で上限、0.33m 手前で下限
     k_side=1.20,       # 横・後退: 指令 = k × 残り距離(オドメトリ)
-    stop_lead=0.15,    # 前進: 残り(LiDAR)がこれ以下[m]になったら指令ゼロ(下限指令 0.30 の実速度 ≈0.08 × 応答遅れ ≈1.5 s)
+    stop_lead=0.15,    # 前進: 残り(LiDAR)がこれ以下[m]になったら指令ゼロ(実機 2026-09-07: 0.5m/s で 0.75m から止め始め 0.55〜0.59m に静止)
+    stop_lead_v=0.5,   # 実速度が 0.45m/s を超えるぶん × これ[s] を stop_lead に足す(速いほど惰性で進む。0.84m/s なら +0.2m)
+    move_lag=0.3,      # 横歩き・後退(オドメトリ): 実速度 × これ[s] ぶん手前で止め始める(内蔵歩行の応答遅れ)
     slew_up=0.60,      # 指令の上げ幅の上限[m/s²]
     slew_down=0.50,    # 指令の下げ幅の上限[m/s²]
     cmd_dur=0.30,      # SetVelocity の duration[s]。10Hz で上書きし続ける。送信が止まれば 0.3 秒で内蔵が自動停止(デッドマン)
@@ -89,14 +92,21 @@ WALK_DEFAULTS = dict(
     align_inplace_deg=8.0,  # これを超えていたらその場で回る。以下なら歩きながら合わせる
     om_turn=0.30,      # 正対の回転速度の上限[rad/s]
     wall_track=True,   # 歩行中も壁の角度を測り続け、向きを壁に垂直へ寄せ続ける
-    # ---- 障害物の回り込み(歩きながら斜めに)
+    # ---- 障害物の回り込み(占有格子 + A* の経路探索。2026-09-07)
     avoid=True,
-    wall_width=1.4,    # 横幅がこれより広い物は壁(回り込まない)[m]
-    detour_margin=0.08,# 障害物の端と体の側面との余白[m]
-    body_half=0.25,    # 体の半幅[m]
-    detour_max=0.9,    # 回り込みで横へ出る上限[m]
-    veer_v=0.50,       # 回り込み(斜め歩き)中の前進指令の上限[m/s]
+    detour_side="left",# 回り込む側の優先: left / right / auto(近い方)。優先側に経路が無いときだけ反対側
+    wall_width=1.4,    # 面の幅がこれの 8 割以上ある平面を「壁」として角度追従・距離の候補にする[m](表示の壁/障害物の区別にも)
+    detour_margin=0.12,# 障害物の点と体の側面との余白[m](経路はこの外を通る。通れないときだけ中に入る)。追従が角を 10cm ほど内側に切る
+    body_half=0.25,    # 体の半幅[m]。障害物の点からこの距離の中は経路にしない
+    detour_max=1.5,    # 回り込みで経路線から横へ出る上限[m]。経路がこれより外を通る物は回り込まない(手前で止まる)
+    veer_v=0.50,       # 回り込み中の指令の大きさの上限[m/s]
     side_tol=0.03,     # 横移動の到達許容[m]
+    grid_res=0.08,     # 占有格子の刻み[m]
+    plan_dt=0.30,      # 経路探索の間隔[s]
+    look_m=0.45,       # 経路の先読み距離[m](この先の点へ向かう速度ベクトルを出す。長いと角を内側に切る)
+    mem_s=4.0,         # 占有格子が点を覚えている時間[s](自分の体の陰に入った脇の物を忘れない)
+    lam_e=0.5,         # 経路線 e=0 から離れることの罰(1 歩あたり、1m につき)。通り過ぎたらこれで戻る
+    lam_side=4.0,      # 優先しない側(detour_side の反対)に 15cm 超入ることの罰(1 歩あたり、一定)。優先側に経路が無いときだけ反対側を通る
 )
 WALK_FSMS = {200, 500, 501}        # 速度指令を受ける内蔵FSM(loco)。802/801 では効かない(2026-09-04 実測)
 YAW_KP = 1.6                       # 直進保持のゲイン[(rad/s)/rad](旧コックピット実績値)
@@ -106,8 +116,8 @@ LIDAR_STALE_S = 0.8                # 点群がこれ以上古ければ前進を�
 CMD_HOLD_S = 0.5                   # 指令の有効期間。これを過ぎたらゼロを送る
 TILT_ABORT_DEG = 25.0              # 歩行中にこれを超えたら自動歩行を止める
 SENSOR_FWD_OFFSET = 0.10           # センサ座標の点群を使うときのセンサ→骨盤の前方オフセット[m]
-MAX_DETOURS = 2                    # 1回の前進で回り込む回数の上限
-EMERGENCY_STOP_M = 0.45            # 回り込み中でも、これより近い点があれば止める[m](自己除外 0.40m の外側)
+MAX_DETOURS = 4                    # 1回の前進で回り込む回数の上限
+WALL_MIN_LEN = 2.0                 # これ以上の幅の平面は「壁」= 目的地。回り込まない・角度を追う[m]
 
 # Livox Mid-360 の点の型(unitree utlidar 配信の実測。フィールド情報が来れば
 # そちらを優先して組み立て直す)
@@ -479,6 +489,10 @@ class ObstacleDetector:
         #   「幅1.57mの壁」= 自分の腕)。前方 self_fwd・左右 self_lat の箱の中は無視する
         own = (fwd > -0.8) & (fwd < cfg.get("self_fwd", 0.4)) & (np.abs(lat) < cfg.get("self_lat", 0.5))
         hm = hm & ~own
+        # 占有格子(回り込みの経路探索)用の点。高さ帯の中・自分の体の外・前後 −1〜6m・左右 ±4.5m
+        # (★格子(経路線 ±2.1m)を機体がどこに居ても覆う幅。狭いと格子の端が未観測=空きに見えて壁の裏へ経路が抜ける)
+        mg = hm & (fwd > -1.0) & (fwd < 6.0) & (np.abs(lat) < 4.5)
+        out["pts"] = np.stack([fwd[mg], lat[mg]], 1).astype(np.float32)
         hw = cfg["half_w"]
         m = hm & (fwd > 0.10) & (fwd < 3.0) & (np.abs(lat) < hw)
         n_obs = int(m.sum())
@@ -546,10 +560,11 @@ class ObstacleDetector:
         return out
 
     def fit_wall(self, fwd, lat, h, hm):
-        """前方セクタ(|lat|<1.2m, 0.2<fwd<6m, h 0.25〜1.6)の点に、進行方向にほぼ垂直な直線を当てる。
+        """前方セクタ(|lat|<2.5m, 0.2<fwd<6m, h 0.25〜1.6)の点に、進行方向にほぼ垂直な直線を当てる。
+        (2026-09-07: 幅 2.5m に広げた。1.2m だと経路線から外れた位置で壁の見えている幅が 2m を切り、壁の端を回り込んだ)
         戻り値 (壁までの距離[m] つま先基準・進行線との交点, 壁の法線と進行方向の角度[deg], 壁の見えている幅[m])
         取れなければ (None, None, None)"""
-        m = hm & (h > 0.25) & (h < 1.6) & (np.abs(lat) < 1.2) & (fwd > 0.2) & (fwd < 6.0)
+        m = hm & (h > 0.25) & (h < 1.6) & (np.abs(lat) < 2.5) & (fwd > 0.2) & (fwd < 6.0)
         n = int(m.sum())
         if n < 40:
             return None, None, None
@@ -581,6 +596,9 @@ class ObstacleDetector:
         best = min(good, key=lambda c: c[3])
         _cnt, nrm, p0, _xh = best
         inl = X[np.abs((X - p0) @ nrm) < 0.04]
+        # ★進行線(lat=0)をまたがない面(脇の物)は壁にしない。直線を延長した交点で「何も無い所」に止まらないため(2026-09-07)
+        if float(inl[:, 1].min()) > 0.5 or float(inl[:, 1].max()) < -0.5:
+            return None, None, None
         cen = inl.mean(axis=0)
         u, s, vt = np.linalg.svd(inl - cen, full_matrices=False)
         d = vt[0]                                       # 直線の向き
@@ -735,6 +753,150 @@ def yaw_error_from_motion(shift, db):
 
 
 # ---------------------------------------------------------------- 速度の較正(指令 → 実速度)
+# ---------------------------------------------------------------- 回り込みの経路探索(占有格子 + A*)
+class PathMap:
+    """経路座標(s 前・e 左)の小さな占有格子。体基準の点群を毎コマ書き込み、mem_s 秒だけ覚える。
+
+    点から body_half の中は「通れない」、そこから detour_margin までは「できれば通らない」層にして、
+    A* で目標の行(前方 4.4m 先か、最大前進距離)まで、短くて経路線 e=0 に近い経路を探す。
+    優先しない側(既定は右)に 15cm 超入るマスには 1 歩ごとに一定の罰があるので、優先側(左)に経路が
+    あれば(多少遠回りでも)そちらを通る。
+    目標まで届かなければ、届いた中でいちばん前(s − 0.7|e| が最大)の所までの経路を返す。
+    """
+
+    NEIGH = ((1, 0, 1.0), (-1, 0, 1.0), (0, 1, 1.0), (0, -1, 1.0),
+             (1, 1, 1.41421), (1, -1, 1.41421), (-1, 1, 1.41421), (-1, -1, 1.41421))
+
+    def __init__(self, res, s_min, s_max, e_max, body_half, margin, mem_s):
+        self.res = float(res)
+        self.s_min = float(s_min)
+        self.e_max = float(e_max)
+        self.H = int(round((s_max - s_min) / self.res)) + 1
+        self.W = int(round(2.0 * e_max / self.res)) + 1
+        self.t_occ = np.full((self.H, self.W), -1e18)
+        self.mem_s = float(mem_s)
+        self.r_hard = float(body_half)
+        self.r_soft = float(body_half) + float(margin)
+        self._d_hard = self._disc(self.r_hard)
+        self._d_soft = self._disc(self.r_soft)
+        self.e_of_col = -self.e_max + np.arange(self.W) * self.res
+        self.n_expand = 0
+        self.t_plan_ms = 0.0
+
+    def _disc(self, r):
+        n = int(math.ceil(r / self.res))
+        return [(di, dj) for di in range(-n, n + 1) for dj in range(-n, n + 1)
+                if math.hypot(di, dj) * self.res <= r + 1e-9]
+
+    def clear(self):
+        self.t_occ.fill(-1e18)
+
+    def cell(self, s, e):
+        i = int(round((s - self.s_min) / self.res))
+        j = int(round((e + self.e_max) / self.res))
+        return min(self.H - 1, max(0, i)), min(self.W - 1, max(0, j))
+
+    def coord(self, i, j):
+        return self.s_min + i * self.res, -self.e_max + j * self.res
+
+    def add(self, se, t_now, min_pts=2):
+        """se: (N,2) 経路座標の点。1 セルに min_pts 個以上あれば占有(1 個だけの点はノイズとみなす)"""
+        if se is None or len(se) == 0:
+            return
+        i = np.rint((se[:, 0] - self.s_min) / self.res).astype(np.int64)
+        j = np.rint((se[:, 1] + self.e_max) / self.res).astype(np.int64)
+        ok = (i >= 0) & (i < self.H) & (j >= 0) & (j < self.W)
+        if not ok.any():
+            return
+        cnt = np.bincount(i[ok] * self.W + j[ok], minlength=self.H * self.W).reshape(self.H, self.W)
+        self.t_occ[cnt >= int(min_pts)] = t_now
+
+    def occupied(self, t_now):
+        return (t_now - self.t_occ) < self.mem_s
+
+    def occupied_box(self, occ, s0, s1, e0, e1):
+        """箱 s0..s1 × e0..e1 の中に占有セルがあるか"""
+        i0, j0 = self.cell(min(s0, s1), min(e0, e1))
+        i1, j1 = self.cell(max(s0, s1), max(e0, e1))
+        return bool(occ[i0:i1 + 1, j0:j1 + 1].any())
+
+    @staticmethod
+    def _dilate(occ, offs):
+        out = np.zeros_like(occ)
+        H, W = occ.shape
+        for di, dj in offs:
+            out[max(0, di):H + min(0, di), max(0, dj):W + min(0, dj)] |= \
+                occ[max(0, -di):H + min(0, -di), max(0, -dj):W + min(0, -dj)]
+        return out
+
+    def plan(self, occ, start, i_target, rows, lam_e=0.5, lam_side=3.0, side=1, max_expand=2500, e_lim=None):
+        """A*。戻り値 (経路 [(i,j),...] 始点から, 目標の行に届いたか)。経路が無ければ ([始点], False)。
+        rows=(i_lo, i_hi) の行だけ、|e| <= e_lim の列だけ探す(時間を抑える。外は横ずれ上限で使えない)。
+        始点が占有の中でも出発はできる。side=+1 なら左(e>0)を優先、−1 なら右、0 なら罰なし"""
+        import heapq
+        t0 = time.time()
+        hard = self._dilate(occ, self._d_hard)
+        soft = self._dilate(occ, self._d_soft)
+        extra = np.where(soft, 3.0, 0.0)
+        H, W = occ.shape
+        i_lo, i_hi = max(0, rows[0]), min(H - 1, rows[1])
+        e_abs = np.abs(self.e_of_col)
+        j_lo, j_hi = 0, W - 1
+        if e_lim is not None:
+            j_lo = int(np.searchsorted(self.e_of_col, -float(e_lim)))
+            j_hi = int(np.searchsorted(self.e_of_col, float(e_lim), side="right")) - 1
+            j_lo, j_hi = min(j_lo, start[1]), max(j_hi, start[1])
+        pen = lam_e * e_abs
+        if side:
+            pen = pen + np.where(side * self.e_of_col < -0.15, lam_side, 0.0)
+        g = {start: 0.0}
+        came = {}
+        closed = set()
+        heap = [(0.0, 0, start)]
+        best, best_sc = start, -1e18
+        reached = False
+        n = 0
+        tie = 0
+        while heap:
+            _f, _t, cur = heapq.heappop(heap)
+            if cur in closed:
+                continue
+            closed.add(cur)
+            n += 1
+            i, j = cur
+            sc = i * self.res - 0.7 * e_abs[j]
+            if sc > best_sc:
+                best, best_sc = cur, sc
+            if i >= i_target:
+                best, reached = cur, True
+                break
+            if n > max_expand:
+                break
+            gc = g[cur]
+            for di, dj, L in self.NEIGH:
+                ni, nj = i + di, j + dj
+                if ni < i_lo or ni > i_hi or nj < j_lo or nj > j_hi:
+                    continue
+                if hard[ni, nj]:
+                    continue
+                if di and dj and (hard[i + di, j] or hard[i, j + dj]):
+                    continue                       # 角をかすめない
+                ng = gc + L * (1.0 + extra[ni, nj]) + pen[nj]
+                nb = (ni, nj)
+                if ng < g.get(nb, 1e18):
+                    g[nb] = ng
+                    came[nb] = cur
+                    tie += 1
+                    heapq.heappush(heap, (ng + max(0, i_target - ni), tie, nb))
+        path = [best]
+        while path[-1] in came:
+            path.append(came[path[-1]])
+        path.reverse()
+        self.n_expand = n
+        self.t_plan_ms = (time.time() - t0) * 1000.0
+        return path, reached
+
+
 class _Abort(Exception):
     pass
 
@@ -778,6 +940,8 @@ class AutoWalk:
         self.step_est = 0.06
         self.steps = 0
         self.stop_info = None        # 停止の記録 {d0, d1, d2, t_settle, fsm_mode}
+        self.plan_info = None        # 回り込みの経路探索の様子(表示用)
+        self._map = None             # PathMap(前進中だけ)
         self.t_start = time.time()
         mode0 = self.p.get("mode", "both")
         self.need_lidar = (mode0 not in ("side", "back")
@@ -992,13 +1156,47 @@ class AutoWalk:
         return t_settle is not None
 
     # ---- 前進(壁の手前で止まる。障害物は歩きながら回り込む)
+    @staticmethod
+    def _lookahead(pts, s, e, look):
+        """経路の点列 [(s,e)...] 上で、機体にいちばん近い点から look[m] 先の点へ向かうベクトルに、
+        経路へ戻す成分(いちばん近い点までのずれ × 2)を足した単位ベクトル(経路座標)と、経路の残り長さ[m]。
+        (先読みだけだと角を内側に切って障害物に寄る。2026-09-07 モック: 余白 0.33m の経路で実際は 0.19m)
+        経路が look より短ければ終点へ向かう。終点が 5cm 以内なら (0,0)"""
+        k0 = int(np.argmin([(ps - s) ** 2 + (pe - e) ** 2 for ps, pe in pts]))
+        acc = 0.0
+        tgt = pts[-1]
+        prev = (s, e)
+        found = False
+        for q in pts[k0:]:
+            seg = math.hypot(q[0] - prev[0], q[1] - prev[1])
+            if not found and acc + seg >= look:
+                tgt = q
+                found = True
+            acc += seg
+            prev = q
+        ds, de = tgt[0] - s, tgt[1] - e
+        if math.hypot(ds, de) < 0.05:
+            return 0.0, 0.0, acc
+        ds += 2.0 * (pts[k0][0] - s)
+        de += 2.0 * (pts[k0][1] - e)
+        L = math.hypot(ds, de)
+        if L < 1e-6:
+            return 0.0, 0.0, acc
+        return ds / L, de / L, acc
+
     def _forward(self):
-        """戻り値: "wall"(壁・障害物の手前で停止) / "max"(壁なしで最大距離)"""
+        """戻り値: "wall"(壁・障害物の手前で停止) / "max"(壁なしで最大距離)
+
+        2026-09-07: 回り込みを「横幅で壁か障害物かを決めて横に寄せる」方式から、点群の占有格子に A* で
+        経路を引き、その経路の先読み点へ向かう速度ベクトルを出す方式へ変えた。
+          - 帯の中の物(dist)は、経路がその奥まで届く(= 周りを通れる)ときだけ止まる対象から外す
+          - 経路が届かない物(壁、部屋いっぱいの物、隙間が体より狭い)は今までどおり LiDAR の距離で止まる
+          - 経路線 e=0 から離れると 1 歩ごとに罰があるので、通り過ぎたら自然に経路線へ戻る
+          - 優先する側(detour_side、既定は左)の反対には追加の罰。優先側に経路が無いときだけ反対側
+        """
         p = self.p
         self.phase = "FORWARD"
         self.v = 0.0
-        vy = 0.0
-        veer = None
         t_phase = time.time()
         t_prev = t_phase
         t_limit = float(p["max_fwd"]) / 0.08 + 20.0
@@ -1008,6 +1206,18 @@ class AutoWalk:
         hit = 0
         stall_d = None                              # 停滞の見張り: 前回そこそこ動いていたときの距離
         stall_t = time.time()
+        avoid = bool(p.get("avoid", True))
+        side_pref = {"left": 1, "right": -1}.get(str(p.get("detour_side", "left")), 0)
+        e_max = float(p["detour_max"]) + 0.6
+        lm = self._map = PathMap(res=float(p["grid_res"]), s_min=-1.0, s_max=float(p["max_fwd"]) + 2.0, e_max=e_max,
+                                 body_half=float(p["body_half"]), margin=float(p["detour_margin"]),
+                                 mem_s=float(p["mem_s"]))
+        plan = None                                 # dict(pts=[(s,e)...], reached, t, seen, n, ms)
+        t_plan = 0.0
+        passing = None                              # いま回り込んでいる物 dict(s_far, side, t0, e_out)
+        t_noplan_log = 0.0
+        t_zero = None                               # 回り込み中に指令ゼロが続いた時刻
+        cm = float(p["cmd_min"])
         while True:
             time.sleep(0.1)
             now = time.time()
@@ -1023,10 +1233,13 @@ class AutoWalk:
                 self.v = 0.0
                 self.msg = f"待機: 障害物の判定不能({obs.get('why')})"
                 continue
-            if veer is None:                        # ★回り込み中は経路を張り直さない(目標が壊れる)
-                self._track_wall_heading(obs, od)
             dist = obs.get("dist")                  # 帯の中の最近点(障害物も壁も)
             ah = obs.get("ahead")
+            # 経路線の張り直しは、回り込んでおらず経路線の近くに居るときだけ(格子の記憶と目標が壊れる)
+            if self._track_wall_heading(obs, od, allow_rebase=(passing is None and abs(e) <= 0.15)):
+                s, e = self._pose(od)
+                plan = None
+            psi = _wrap(od[3] - math.atan2(self._fy, self._fx))   # 経路に対する体の向き
             wl = obs.get("wall_len") or 0.0
             wall_d = obs.get("wall_dist") if wl >= 0.8 * float(p["wall_width"]) else None
             # 実速度(LiDAR の距離の減り)。★点群が更新されたコマだけで測る(同じコマを 2 回数えない)
@@ -1038,56 +1251,93 @@ class AutoWalk:
                     self.v_meas = 0.7 * self.v_meas + 0.3 * ((d_prev - d_now) / max(0.05, now - t_dprev))
                 d_prev, t_dprev = d_now, now
                 obs_t_prev = self._obs_t
-            # --- 回り込みの開始: 壁でない物体が近づいたら、空いている側へ歩きながら寄せる
-            if (veer is None and p.get("avoid", True) and dist is not None and ah is not None
-                    and not ah["wall"] and self.detours < MAX_DETOURS
-                    and dist <= max(float(p["stop_dist"]) + 0.9, 1.5)):
-                cands = [c for c in (ah.get("free_l"), ah.get("free_r")) if c is not None]
-                if cands:
-                    e_t = min(cands, key=abs)
-                    veer = dict(e_t=e + e_t, s_end=s + dist + ah["depth"] + 0.25, stage="out",
-                                dir=(1.0 if e_t > 0 else -1.0), moving_e=True,
-                                obj_lo=e + ah["lat_lo"], obj_hi=e + ah["lat_hi"],
-                                obj_s=s + dist + ah["depth"])
-                    self.phase = "DETOUR_OUT"
-                    self.io["log"](f"障害物 {dist:.2f}m(横幅{ah['lat_hi'] - ah['lat_lo']:.2f}m・奥行{ah['depth']:.2f}m) — "
-                                   f"歩きながら{'左' if e_t > 0 else '右'}へ{abs(e_t):.2f}m寄せて脇を通ります")
-                elif now - getattr(self, "_t_noveer", 0.0) > 2.0:
-                    self._t_noveer = now
-                    self.io["log"](f"障害物 {dist:.2f}m(横幅{ah['lat_hi'] - ah['lat_lo']:.2f}m)に回り込み先が無い"
-                                   f"(左 {ah.get('free_l')} / 右 {ah.get('free_r')}) — 手前で止まります")
-            # --- 残り距離。回り込み中は「いま避けている物」だけ無視し、それ以外(別の物・壁)は普通に止まる。
-            #     ★自分の体を隠す範囲が前方 0.40m なので、緊急の床は 0.45m(それ未満は測れない)
-            if veer is not None:
-                # 「いま避けている物」かどうか(経路座標での横の重なり)
-                same_obj = False
-                if ah is not None and dist is not None:
-                    lo, hi = e + ah["lat_lo"], e + ah["lat_hi"]
-                    ov = min(hi, veer["obj_hi"]) - max(lo, veer["obj_lo"])
-                    w = min(max(hi - lo, 1e-3), max(veer["obj_hi"] - veer["obj_lo"], 1e-3))
-                    same_obj = (ov > 0.5 * w) and (s + dist <= veer["obj_s"] + 0.6)
-                # 横の余白(体の中心から物の端まで)。体の半幅ぶん空いていれば脇を通れる
-                if e <= veer["obj_lo"]:
-                    clear_e = veer["obj_lo"] - e
-                elif e >= veer["obj_hi"]:
-                    clear_e = e - veer["obj_hi"]
-                else:
-                    clear_e = 0.0
-                can_pass = (clear_e >= float(p["body_half"])) or (s > veer["obj_s"] + 0.2)
-                veer["clear_e"] = clear_e
-                cands = [x for x in (wall_d,) if x is not None]
-                # 避けている物は、横の余白が取れていれば無視して脇を通る。取れていなければ普通に止まる。
-                # 別の物(重なりが無い)は常に見る
-                if dist is not None and not (same_obj and can_pass):
-                    cands.append(dist)
-                d_use = min(cands) if cands else None
+                pts = obs.get("pts")
+                if avoid and pts is not None and len(pts):
+                    c, sn = math.cos(psi), math.sin(psi)
+                    se = np.empty((len(pts), 2), np.float64)
+                    se[:, 0] = s + pts[:, 0] * c - pts[:, 1] * sn
+                    se[:, 1] = e + pts[:, 0] * sn + pts[:, 1] * c
+                    lm.add(se, now)
+            # --- 経路探索: 前 3m に何かある / 回り込み中 / 経路線からずれている とき、plan_dt ごと
+            s_max_path = float(p["max_fwd"]) - self.traveled_base
+            need = avoid and ((dist is not None and dist < 3.0) or passing is not None or abs(e) > 0.10)
+            if need and now - t_plan >= float(p["plan_dt"]):
+                t_plan = now
+                occ = lm.occupied(now)
+                i0, j0 = lm.cell(s, e)
+                i_t, _j = lm.cell(min(s + 4.4, s_max_path), 0.0)
+                path, reached = lm.plan(occ, (i0, j0), i_t, rows=(i0 - 5, i0 + 58),
+                                        lam_e=float(p["lam_e"]), lam_side=float(p["lam_side"]), side=side_pref,
+                                        e_lim=float(p["detour_max"]) + 0.4)
+                pts_se = [lm.coord(i, j) for i, j in path]
+                # 帯の中の物が格子に写っているか(写っていない物は経路が素通りするので、その経路は信用しない)
+                seen = (dist is None) or lm.occupied_box(occ, s + dist - 0.10, s + dist + 0.30, e - 0.40, e + 0.40)
+                plan = dict(pts=pts_se, reached=bool(reached), t=now, seen=bool(seen), n=lm.n_expand, ms=lm.t_plan_ms)
+            if plan is not None and now - plan["t"] > 1.5:
+                plan = None
+            # --- 回り込めるか: 経路が帯の中の物の奥まで届いていれば、その物では止まらない
+            obj_far = None if (dist is None or ah is None) else s + dist + float(ah["depth"])
+            # 幅 WALL_MIN_LEN 以上の面が帯の物と同じ距離にあれば、それは壁(目的地)。端が空いていても回り込まない
+            wall_like = (dist is not None and wall_d is not None and wl >= WALL_MIN_LEN and abs(wall_d - dist) < 0.5)
+            e_out = 0.0
+            if plan is not None and obj_far is not None and len(plan["pts"]) >= 2:
+                near = [pe - e for ps, pe in plan["pts"] if ps <= obj_far + 0.3]
+                e_out = max(near, key=abs) if near else 0.0
+            cp_why = ""                             # 通れない理由(記録用)
+            if obj_far is None:
+                cp_why = "前に物なし"
+            elif plan is None or len(plan["pts"]) < 2:
+                cp_why = "経路なし"
+            elif not plan["seen"]:
+                cp_why = "格子に写っていない"
+            elif wall_like:
+                cp_why = "壁"
+            elif abs(e + e_out) > float(p["detour_max"]):
+                cp_why = "横ずれ上限"
+            elif plan["pts"][-1][0] < obj_far + 0.15:
+                cp_why = "経路が物の奥に届かない"
+            elif passing is None and self.detours >= MAX_DETOURS:
+                cp_why = "回数上限"
+            can_pass = (cp_why == "")
+            if passing is None:
+                if can_pass:
+                    passing = dict(s_front=s + dist, s_far=obj_far, side=(1.0 if e_out >= 0 else -1.0), t0=now, e_out=e_out)
+                    self.phase = "DETOUR"
+                    self.io["log"](f"障害物 {dist:.2f}m(横幅{ah['lat_hi'] - ah['lat_lo']:.2f}m・奥行{ah['depth']:.2f}m)の周りに"
+                                   f"経路が引けました — {'左' if e_out >= 0 else '右'}へ最大{abs(e_out):.2f}m寄って脇を通ります"
+                                   f"(格子{plan['n']}マス {plan['ms']:.0f}ms)")
+                elif (dist is not None and ah is not None and dist < 1.5 and plan is not None
+                      and not wall_like and now - t_noplan_log > 2.0):
+                    t_noplan_log = now
+                    why = (f"経路線から横へ{abs(e + e_out):.2f}m 出ないと通れない(上限{float(p['detour_max']):.2f})"
+                           if cp_why == "横ずれ上限" else "周りに経路が無い" if cp_why == "経路が物の奥に届かない" else cp_why)
+                    self.io["log"](f"障害物 {dist:.2f}m(横幅{ah['lat_hi'] - ah['lat_lo']:.2f}m)は{why}"
+                                   f"(経路の先端 {plan['pts'][-1][0] - s:+.2f}m 先) — 手前で止まります")
             else:
-                d_use = min([x for x in (dist, wall_d) if x is not None], default=None)
+                if can_pass and obj_far is not None and obj_far <= passing["s_far"] + 0.6:
+                    passing["s_far"] = max(passing["s_far"], obj_far)     # 同じ物の奥行きが見えてきたら伸ばす(奥の別の物では伸ばさない)
+                # 通り過ぎたか: 物の前面に並んだ後、通っている側の反対(物が居る側)の箱(前方は最大 1.5m まで)に占有が無い
+                sd = passing["side"]
+                occ_now = lm.occupied(now)
+                still = lm.occupied_box(occ_now, s - 0.2, max(s + 0.5, min(passing["s_far"], s + 1.5) + 0.2),
+                                        e - sd * 0.95, e - sd * 0.10)
+                if not still and s > passing["s_front"] - 0.2 and now - passing["t0"] > 1.0:
+                    self.detours += 1
+                    self.io["log"](f"障害物を通り過ぎました(進み{self.traveled:.2f}m、ずれ{e * 100:+.0f}cm) — 経路線へ戻ります")
+                    passing = None
+                    self.phase = "FORWARD"
+            # --- 残り距離(LiDAR)。回り込める物は除く(その面の平面も除く)。別の物・奥の壁は普通に止まる
+            if can_pass:
+                cands = [wall_d] if (wall_d is not None and dist is not None and wall_d > dist + 0.5) else []
+            else:
+                cands = [x for x in (dist, wall_d) if x is not None]
+            d_use = min(cands) if cands else None
             err = None if d_use is None else d_use - float(p["stop_dist"])
-            # --- 停止: 残りが stop_lead 以下。★点群が更新されたコマで 2 回続けて(1 コマのノイズで止めない)
+            # --- 停止: 残りが stop_lead 以下(速いときは惰性ぶん早めに)。★点群が更新されたコマで 2 回続けて(1 コマのノイズで止めない)
+            lead = float(p["stop_lead"]) + max(0.0, self.v_meas - 0.45) * float(p.get("stop_lead_v", 0.5))
             if fresh_obs:
-                hit = hit + 1 if (err is not None and err <= float(p["stop_lead"])) else 0
-            elif err is not None and err > float(p["stop_lead"]):
+                hit = hit + 1 if (err is not None and err <= lead) else 0
+            elif err is not None and err > lead:
                 hit = 0
             if hit >= 2:
                 what = "壁" if (wall_d is not None and (d_use == wall_d)) or (ah and ah["wall"]) else "障害物"
@@ -1100,8 +1350,8 @@ class AutoWalk:
                 self._stop_and_settle("最大距離")
                 return "max"
             # --- 停滞の見張り: 下限以上の指令を出しているのに 6 秒で 5cm も縮まらない = 歩行が指令に応じていない
-            if self.v >= float(p["cmd_min"]) - 1e-6 and d_now is not None:
-                # 進んだ(5cm 縮んだ)か、見ている物が変わった(25cm 以上遠くなった。回り込みで脇を抜けた等)なら数え直す
+            #     (回り込み中は距離が縮まらないのが普通なので見ない)
+            if self.v >= cm - 1e-6 and d_now is not None and not can_pass and passing is None:
                 if stall_d is None or d_now < stall_d - 0.05 or d_now > stall_d + 0.25:
                     stall_d, stall_t = d_now, now
                 elif now - stall_t > 6.0:
@@ -1111,63 +1361,77 @@ class AutoWalk:
                                  "(十字キーで歩けるか確認。docs 自動歩行 §6b-15)")
             else:
                 stall_d, stall_t = None, now
-            # --- 前進指令: 残り距離に比例(下限 cmd_min・上限 v_fwd)。回り込み中は veer_v 以下
-            cmd_max = float(p["v_fwd"]) if veer is None else min(float(p["v_fwd"]), float(p["veer_v"]))
-            v_t = self._cmd_for(err, cmd_max, float(p["k_dist"])) if err is not None else cmd_max
-            if veer is not None and v_t < float(p["cmd_min"]):
-                v_t = float(p["cmd_min"])            # 寄せている間は歩き続ける
+            # --- 方向: 経路の先読み点へ(経路座標)。経路が無い・短いときは真っすぐ
+            d_s, d_e, rem = 1.0, 0.0, None
+            use_plan = (plan is not None and len(plan["pts"]) >= 2 and plan["pts"][-1][0] >= s + 0.25)
+            if use_plan:
+                d_s, d_e, rem = self._lookahead(plan["pts"], s, e, float(p["look_m"]))
+                if abs(d_s) < 1e-9 and abs(d_e) < 1e-9:
+                    d_s, d_e = 1.0, 0.0
+                if d_s < 0.15:                      # 後ろ向きの成分は出さない(横に逃げるだけ)
+                    d_s = 0.15
+                    L = math.hypot(d_s, d_e)
+                    d_s, d_e = d_s / L, d_e / L
+            # --- 大きさ: 残り距離に比例(下限 cmd_min・上限 v_fwd)。回り込み中は veer_v 以下、
+            #     物の正面がまだ 0.6m 以内に見えている間は下限で(斜めにゆっくり抜ける)
+            if can_pass:
+                cmd_max = min(float(p["v_fwd"]), float(p["veer_v"]))
+                errs = [s_max_path - s]
+                if err is not None:
+                    errs.append(err)
+                if plan is not None and not plan["reached"] and rem is not None:
+                    errs.append(rem + lm.r_soft - float(p["stop_dist"]))
+                err_sp = min(errs)
+                if dist is not None and dist < 0.6:
+                    cmd_max = cm
+            else:
+                cmd_max = float(p["v_fwd"])
+                if abs(e) > 0.20 and self.detours > 0:
+                    cmd_max = min(cmd_max, float(p["veer_v"]))   # 回り込みの後、経路線へ戻り切るまでは速く歩かない
+                err_sp = min([x for x in (err, s_max_path - s) if x is not None])
+            v_t = self._cmd_for(err_sp, cmd_max, float(p["k_dist"]))
+            if v_t > 0.0 and use_plan:
+                # ★斜めのとき、大きい方の成分が下限 cmd_min に届くように全体を底上げ(各軸に不感帯があっても動く)
+                v_t = max(v_t, cm / max(abs(d_s), abs(d_e), 0.5))
+            if can_pass and v_t <= 0.0:
+                t_zero = t_zero or now
+                if now - t_zero > 2.5:              # 経路の先が塞がっているのに帯の物では止まれない → 止める
+                    self.io["log"](f"回り込みの経路の先が塞がっています(経路の残り{rem if rem is None else round(rem, 2)}m) — 止めます")
+                    self.phase = "STOPPING"
+                    self._stop_and_settle("経路の先")
+                    return "wall"
+            else:
+                t_zero = None
             self.v = self._slew(self.v, v_t, dt)
-            # --- 横指令: 回り込み中は目標の横位置へ、それ以外は経路線の保持(10cm 超のずれだけ)
-            vy_t = 0.0
-            if veer is not None:
-                rem_e = veer["e_t"] - e
-                if veer["stage"] == "out":
-                    # 奥行きの見積り(0.5m 上限)より深い物は、見えている間は「通り過ぎる位置」を伸ばす
-                    if (same_obj and dist is not None and ah is not None and not ah["wall"]
-                            and s < veer["obj_s"]):     # ★まだ通り過ぎていない間だけ(壁では伸ばさない)
-                        veer["obj_s"] = max(veer["obj_s"], s + dist + ah["depth"])
-                        veer["s_end"] = max(veer["s_end"], veer["obj_s"] + 0.25)
-                    sf = obs.get("side_free_l" if veer["dir"] > 0 else "side_free_r")
-                    if abs(rem_e) > 0.06 and sf is not None and sf < float(p["side_clear"]):
-                        self.io["vel"](0.0, 0.0, 0.0)
-                        self.v = 0.0
-                        raise _Abort(f"中止(DETOUR_OUT): 回り込む側 {sf:.2f}m に障害物")
-                    if abs(rem_e) <= 0.06 and s >= veer["s_end"]:
-                        veer["stage"] = "back"
-                        veer["e_t"] = 0.0
-                        self.phase = "DETOUR_BACK"
-                        self.io["log"](f"障害物を通り過ぎました(進み{self.traveled:.2f}m) — 歩きながら元の経路へ戻ります")
-                else:
-                    if abs(rem_e) <= 0.06:
-                        veer = None
-                        self.detours += 1
-                        self.phase = "FORWARD"
-                        self.io["log"](f"元の経路へ戻りました(回り込み{self.detours}回目)")
-                if veer is not None:
-                    # ヒステリシス: 10cm 超で寄せ始め、3cm 未満で止める(往復を防ぐ)
-                    if veer.get("moving_e", True) and abs(rem_e) < 0.03:
-                        veer["moving_e"] = False
-                    elif not veer.get("moving_e", True) and abs(rem_e) > 0.10:
-                        veer["moving_e"] = True
-                    if veer["moving_e"]:
-                        vy_t = math.copysign(self._cmd_for(abs(rem_e), float(p["v_side"]), float(p["k_side"])), rem_e)
-            elif abs(e) > 0.10 and self.v > 0.0:
-                vy_t = math.copysign(float(p["cmd_min"]), -e)
-            vy = self._slew(vy, vy_t, dt) if vy_t >= vy else max(vy_t, vy - float(p["slew_down"]) * dt)
-            om = self._om() if (self.v > 0.0 or abs(vy) > 0.0) else 0.0
-            self.io["vel"](self.v, vy, om)
+            c, sn = math.cos(psi), math.sin(psi)   # 経路座標 → 体基準
+            vx = self.v * (d_s * c + d_e * sn)
+            vy = self.v * (-d_s * sn + d_e * c)
+            vy = float(np.clip(vy, -float(p["v_side"]), float(p["v_side"])))
+            if passing is None and abs(e) > 0.10 and self.v > 0.0 and abs(vy) < cm:
+                vy = math.copysign(cm, -e)          # 経路線保持(10cm 超のずれ): 下限未満の横指令は足踏みだけなので下限で
+            om = self._om() if self.v > 0.0 else 0.0
+            self.io["vel"](vx, vy, om)
             wa = obs.get("wall_ang")
-            self.msg = (f"{'回り込み' if veer is not None else '前進'}"
-                        f"{'' if veer is None else '(余白%.2fm)' % veer.get('clear_e', 0.0)}"
-                        f" 指令{self.v:.2f} 横{vy:+.2f} 回転{om:+.2f} | 残り "
+            pl = None if plan is None else ("経路あり" if plan["reached"] else "経路(途中まで)")
+            self.plan_info = (None if plan is None else
+                              dict(state=("通れる" if can_pass else pl), why=cp_why, reached=plan["reached"], seen=plan["seen"],
+                                   n=plan["n"], ms=round(plan["ms"], 1), end=round(plan["pts"][-1][0] - s, 2),
+                                   passing=(None if passing is None else ("左" if passing["side"] > 0 else "右")),
+                                   dir=[round(d_s, 2), round(d_e, 2)]))
+            self.msg = (f"{'回り込み' if passing is not None else '前進'}"
+                        f"{'' if passing is None else '(%s、横%+.2fm)' % ('左' if passing['side'] > 0 else '右', e)}"
+                        f" 指令{self.v:.2f} 前{vx:+.2f} 横{vy:+.2f} 回転{om:+.2f} | 残り "
                         f"{'---' if err is None else f'{err:.2f}m'} 実速度{self.v_meas:.2f}"
                         f"{'' if wa is None else f' 壁の角度{wa:+.0f}°'} | {self.traveled:.2f}m ずれ{e * 100:+.0f}cm")
-            self._rec(cx=round(self.v, 3), cy=round(vy, 3), om=round(om, 3), dist=dist, wall_d=wall_d, err=err,
+            self._rec(cx=round(vx, 3), cy=round(vy, 3), om=round(om, 3), dist=dist, wall_d=wall_d, err=err,
                       v_meas=round(self.v_meas, 3), s=round(self.traveled, 3), e=round(e, 3), n=obs.get("n_obs"),
                       wall_ang=wa, ah_wall=(None if ah is None else bool(ah["wall"])),
                       ah_w=(None if ah is None else round(ah["lat_hi"] - ah["lat_lo"], 2)),
                       free_l=(None if ah is None else ah.get("free_l")), free_r=(None if ah is None else ah.get("free_r")),
-                      veer=(None if veer is None else veer["stage"]))
+                      cp=can_pass, cpw=cp_why, pass_=(None if passing is None else passing["side"]),
+                      pl=(None if plan is None else [plan["reached"], plan["seen"], round(plan["pts"][-1][0] - s, 2),
+                                                     plan["n"], round(plan["ms"])]),
+                      dir=[round(d_s, 2), round(d_e, 2)], rem=(None if rem is None else round(rem, 2)))
 
     # ---- 横歩き・後退(オドメトリ。LiDAR では測れない)
     def _move_axis(self, axis, target, label):
@@ -1198,7 +1462,10 @@ class AutoWalk:
             x = s if axis == "s" else e
             rem = (target - x) * sgn
             hist.append((now, x))
-            if rem <= tol:
+            # 実速度(オドメトリの 0.3 秒の差)× 応答遅れ move_lag ぶん手前で止め始める(速いほど惰性で進む)
+            old = [xx for tt, xx in hist if tt <= now - 0.3]
+            v_est = abs(x - old[-1]) / max(0.3, now - [tt for tt, xx in hist if tt <= now - 0.3][-1]) if old else 0.0
+            if rem <= tol + v_est * float(p.get("move_lag", 0.3)):
                 self.phase = "STOPPING"
                 self._stop_and_settle(label)
                 return True
@@ -1245,6 +1512,7 @@ class AutoWalk:
         recent = []
         n = 0
         last_sgn = 0
+        t_on_prev = float(p["step_on"])
         while True:
             od, obs = self._sense()
             s, e = self._pose(od)
@@ -1274,6 +1542,9 @@ class AutoWalk:
                     return False
             frac = 1.0 if single else min(1.0, abs(rem) / est)
             t_on = max(0.3, float(p["step_on"]) * frac)
+            if n > 0:
+                t_on = min(t_on, t_on_prev + 0.1)  # ★前の 1 歩がほとんど動かなくても、指令時間は一気に伸ばさない(歩き出しの非線形で行き過ぎる)
+            t_on_prev = t_on
             v = sgn * float(p["cmd_min"])
             n += 1
             last_sgn = sgn
@@ -1298,7 +1569,7 @@ class AutoWalk:
             self.steps = n
             recent = (recent + [d])[-3:]
             if d > 0.005:
-                est = d if n == 1 else 0.6 * est + 0.4 * d
+                est = max(0.03, d if n == 1 else 0.6 * est + 0.4 * d)   # 1 歩の推定は 3cm を下回らない(小さすぎる実測で次を伸ばさない)
                 self.step_est = est
             self.io["log"](f"{label}: {n}歩目 {d * 100:+.1f}cm(指令{v:+.2f}×{t_on:.1f}s) 残り{(target - x) * 100:+.1f}cm")
             if n >= 3 and sum(recent) < 0.015:
@@ -1348,22 +1619,27 @@ class AutoWalk:
         self._fx, self._fy = math.cos(yaw_od), math.sin(yaw_od)
         self._lx, self._ly = -math.sin(yaw_od), math.cos(yaw_od)
         self._path_yaw_ref = yaw_ref_imu
+        if self._map is not None:
+            self._map.clear()                      # 経路座標が変わったので覚えていた占有は捨てる(次のコマで写し直す)
 
-    def _track_wall_heading(self, obs, od):
+    def _track_wall_heading(self, obs, od, allow_rebase=True):
         """壁の面の角度 wall_ang を毎コマ見て、目標の向きを壁に垂直へ寄せる(ローパス 0.3)。
-        5 度以上変わったら経路線も張り直す。壁幅の 8 割未満の面(箱・机)は追わない"""
+        5 度以上変わったら経路線も張り直す(allow_rebase のときだけ)。戻り値: 張り直したか。
+        ★幅 2.0m 未満の面(箱・机。幅 1.3m の物を壁と取り違えた 2026-09-07 の走行)は追わない"""
         if not self.p.get("wall_track", True) or not obs.get("ok"):
-            return
+            return False
         ang = obs.get("wall_ang")
         wl = obs.get("wall_len") or 0.0
         wd = obs.get("wall_dist")
-        if ang is None or wl < 0.8 * float(self.p["wall_width"]) or wd is None or wd > 5.0:
-            return
+        if ang is None or wl < max(0.8 * float(self.p["wall_width"]), WALL_MIN_LEN) or wd is None or wd > 5.0:
+            return False
         yaw_now = self.io["yaw"]()
         target = _wrap(yaw_now + math.radians(float(ang)))
         self._yaw_ref = _wrap(self._yaw_ref + 0.3 * _wrap(target - self._yaw_ref))
-        if abs(_wrap(self._yaw_ref - self._path_yaw_ref)) > math.radians(5.0):
+        if allow_rebase and abs(_wrap(self._yaw_ref - self._path_yaw_ref)) > math.radians(5.0):
             self._rebase_path(od, self._yaw_ref)
+            return True
+        return False
 
     def _align_to_wall(self):
         """正面の壁が align_inplace_deg より斜めなら、その場で回転して正対する。戻り値: 回った角度[deg]"""
@@ -1469,6 +1745,12 @@ class AutoWalk:
                 od, obs = self._sense()
                 self._set_path(od)
         how = self._forward()
+        if how == "wall" and self.detours > 0 and abs(self.offset) > 0.15 and mode != "side":
+            # 回り込みの残りのずれ(壁が近くて戻り切れなかった)。壁の手前で横歩きして経路線へ戻す
+            log(f"回り込みで経路線から{self.offset * 100:+.0f}cm ずれたまま止まったので、横歩きで経路線へ戻します")
+            self.phase = "SIDE"
+            if not self._lateral_to(0.0, "経路線へ戻る"):
+                log(f"△経路線へ戻す横歩きが途中で止まりました(ずれ{self.offset * 100:+.0f}cm)")
         if how == "max":
             self.result = f"完了(壁なし): 最大前進距離{p['max_fwd']:.1f}mに到達"
             log(f"自動歩行 {self.result}")
@@ -1505,7 +1787,7 @@ class WalkController:
     """
 
     RANGES = {"v_fwd": (0.3, 0.9), "v_side": (0.3, 0.6), "cmd_min": (0.15, 0.5), "k_dist": (0.3, 2.0),
-              "k_side": (0.3, 2.0), "stop_lead": (0.0, 0.6), "slew_up": (0.2, 2.0), "slew_down": (0.2, 2.0),
+              "k_side": (0.3, 2.0), "stop_lead": (0.0, 0.6), "stop_lead_v": (0.0, 1.5), "move_lag": (0.0, 1.0), "slew_up": (0.2, 2.0), "slew_down": (0.2, 2.0),
               "cmd_dur": (0.2, 1.0), "settle_s": (0.3, 3.0), "settle_max": (2.0, 15.0),
               "stop_dist": (0.3, 2.5), "side_dist": (0.02, 3.0), "max_fwd": (0.3, 10.0), "back_dist": (0.02, 0.5),
               "step_on": (0.2, 1.5), "step_off": (0.3, 2.0), "step_max": (1, 60),
@@ -1513,8 +1795,10 @@ class WalkController:
               "half_w": (0.2, 0.6), "h_min": (0.05, 0.5), "h_max": (0.5, 2.5), "side_clear": (0.2, 1.5),
               "self_fwd": (0.1, 0.8), "self_lat": (0.2, 0.8), "yaw_fix_deg": (-360.0, 360.0), "front_offset": (-0.3, 0.5),
               "align_tol_deg": (1.0, 15.0), "align_inplace_deg": (2.0, 45.0), "om_turn": (0.1, 0.6),
-              "wall_width": (0.8, 3.0), "detour_margin": (0.02, 0.4), "body_half": (0.15, 0.45), "detour_max": (0.3, 1.5),
-              "veer_v": (0.3, 0.9), "side_tol": (0.01, 0.1)}
+              "wall_width": (0.8, 3.0), "detour_margin": (0.02, 0.4), "body_half": (0.15, 0.45), "detour_max": (0.3, 3.0),
+              "veer_v": (0.3, 0.9), "side_tol": (0.01, 0.1),
+              "grid_res": (0.05, 0.15), "plan_dt": (0.1, 1.0), "look_m": (0.3, 1.5), "mem_s": (1.0, 10.0),
+              "lam_e": (0.0, 3.0), "lam_side": (0.0, 10.0)}
 
     def __init__(self, robot, log=print, hb_ok=lambda: True, is_sim=False):
         self.robot = robot
@@ -1552,6 +1836,8 @@ class WalkController:
                 v = str(v) if str(v) in ("both", "forward", "side", "back", "step") else "both"
             elif k == "step_dir":
                 v = str(v) if str(v) in ("left", "right", "back", "fwd") else "left"
+            elif k == "detour_side":
+                v = str(v) if str(v) in ("left", "right", "auto") else "left"
             elif k in ("dry_run", "avoid", "align_wall", "wall_track", "yaw_autocal"):
                 v = bool(v) if not isinstance(v, str) else (v.lower() in ("1", "true", "on", "yes"))
             else:
@@ -1876,6 +2162,7 @@ class WalkController:
             "dirs": obs.get("dirs"),
             "yaw_fix_deg": float(self.params.get("yaw_fix_deg", 0.0)),
             "stop_info": (a.stop_info if a is not None else None),
+            "plan": (a.plan_info if a is not None else None),
             "v_meas": (round(a.v_meas, 2) if a is not None else None),
             "lidar_age_ms": (None if t is None else round((now - t) * 1000)),
             "lidar_n": (self.lidar.n_recv if self.lidar is not None else 0),

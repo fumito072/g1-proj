@@ -57,16 +57,21 @@ class _SimLidar:
             bx, by, w, d, h = b["x"], b["y"], b["w"], b["d"], b["h"]
             if math.hypot(bx - x0, by - y0) > 6.0:
                 continue
-            m = 150
+            # 面の広さに応じた点数(実機の Mid-360 は 8cm のマスに何点も入る。占有格子の試験のため疎にしない)
+            m = max(150, int(500 * w * h))
+            ms = max(60, int(500 * d * h))
+            mt = max(60, int(300 * w * d))
             # 前面(x = bx - d/2)・後面・左右側面・天面
             ys = rng.uniform(by - w / 2, by + w / 2, m)
             zs = rng.uniform(0.0, h, m)
             parts.append(np.stack([np.full(m, bx - d / 2), ys, zs], 1))
             parts.append(np.stack([np.full(m, bx + d / 2), ys, zs], 1))
-            xs = rng.uniform(bx - d / 2, bx + d / 2, m)
-            parts.append(np.stack([xs, np.full(m, by - w / 2), zs], 1))
-            parts.append(np.stack([xs, np.full(m, by + w / 2), zs], 1))
-            parts.append(np.stack([xs, ys, np.full(m, h)], 1))
+            xs = rng.uniform(bx - d / 2, bx + d / 2, ms)
+            zs2 = rng.uniform(0.0, h, ms)
+            parts.append(np.stack([xs, np.full(ms, by - w / 2), zs2], 1))
+            parts.append(np.stack([xs, np.full(ms, by + w / 2), zs2], 1))
+            parts.append(np.stack([rng.uniform(bx - d / 2, bx + d / 2, mt), rng.uniform(by - w / 2, by + w / 2, mt),
+                                   np.full(mt, h)], 1))
         pts = np.concatenate(parts).astype(np.float32)
         pts += rng.normal(0, 0.005, pts.shape).astype(np.float32)
         self.n_recv += 1
@@ -455,10 +460,14 @@ class SimRobot:
                         or time.time() - getattr(self, "_wstart", 0.0) < 0.25:
                     tgt = (0.0, 0.0, 0.0)
                 else:
-                    # 実機 14:08 のログ: 実速度 ≈ 0.4·(指令 − 0.10)。回転はそのまま
-                    def _nl(v):
-                        return math.copysign(0.4 * max(0.0, abs(v) - 0.10), v) if abs(v) >= 0.10 else 0.0
-                    tgt = (_nl(tgt[0]), _nl(tgt[1]), tgt[2])
+                    # 実機 2026-09-07 08:20 のログ(較正・学習なしの素の指令): 前 0.30 → 0.34m/s、0.45 → 0.44、
+                    # 横 0.30 → 0.24m/s。0.25 未満は足踏み主体でほとんど進まない。回転はそのまま
+                    def _nl(v, k):
+                        a = abs(v)
+                        if a < 0.10:
+                            return 0.0
+                        return math.copysign((0.15 if a < 0.25 else k) * a, v)
+                    tgt = (_nl(tgt[0], 0.95), _nl(tgt[1], 0.85), tgt[2])
                 a = min(1.0, dt / 0.4)
                 self._wv = [self._wv[i] + (tgt[i] - self._wv[i]) * a
                             for i in range(3)]
