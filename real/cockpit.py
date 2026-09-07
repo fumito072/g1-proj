@@ -3353,8 +3353,8 @@ KEEPAWAKE_WEBM_B64 = (
     "GkXfo59ChoEBQveBAULygQRC84EIQoKEd2VibUKHgQJChYECGFOAZwEAAAAAAAS1EU2bdLpNu4tTq4QVSalmU6yBoU27i1OrhBZUrmtTrIHYTbuMU6uEElTDZ1OsggEbTbuMU6uEHFO7a1OsggSf7AEAAAAAAABZAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAVSalmsirXsYMPQkBNgI1MYXZmNjIuMTIuMTAxV0GNTGF2ZjYyLjEyLjEwMUSJiECfQAAAAAAAFlSua76uAQAAAAAAADXXgQFzxYigMusuWuY9eJyBACK1nIN1bmSIgQCGhVZfVlA4g4EBI+ODhA7msoDghrCBoLqBeBJUw2fYc3OgY8CAZ8iaRaOHRU5DT0RFUkSHjUxhdmY2Mi4xMi4xMDFzc7JjwItjxYigMusuWuY9eGfIoUWjiERVUkFUSU9ORIeTMDA6MDA6MDIuMDAwMDAwMDAwAB9DtnVDIeeBAKNBcIEAAIAQDQCdASqgAHgAAUcIhYWIhYSIAaIQGUXqRIbUByAPiq5IDvEX7fekdcgWKZzYH+zeAv7AP8I/in+T4AH9gIO1at6KyIPdmMAuGOkJf4lEg0+bxMYnsx0hJXETOsk8ziqbZjALhjpCYAqyIPdmMAuF+AD+/43EnfZF9se0mcuRvmQ5URUwro306Kfv//dOJf6CkX+vsYgn+wOk3hYQ0HejWnJfAa5KUUKv09IQY7f+Ye/Ps0AIao9uvEYrxwXaJt9tRXpHvukcv3M/zbWdfe2ytOQ8Wcqp5bHdb26wQ1j8a2WxvVXEg1S4/r8ojTaUGMOTqRzlv22n+hl1/vX8o+n519zRvMb1gX4sT/+FPO/2qt9LfZM1bMNhIoOgYj2CC5MMI0JSZLBcmHeP+fvOMSqUPhrn5H/k3NRQcv/3HQ//C7rM/yxWJKAf8bCgCtCGslNa1FivN/v9Dv3XmP2cVcXm9JP9ORomK96wzvwAo8OBAPoAEQQAARANEADAThu5+54HlyBpsrvOAOu58gJIB0cQDIpbNQBcre/5EkbqwbGi16O8ARBWTshYOeeBtlGttOIAo7KBAfQAsQMAAxANEADAAMsFOH9Btm4UIbIWtK4+g1mePl46rAAP15YAB9OxJTNJ1+R/AKO8gQLuALEDAAMQDRAAwADLAXP/QVCUWFvux3NTjOakzeoLOIWAMnOClv734rU1CI9CfFuhJ4lvPJml507Ao7eBA+gA0QMABxANEAD1YYBbCKafqpZGaLv6Cfx/my2Xo/0FavLMLp2xEnJdo3iYI3vO14XTXrAAo8aBBOIAEQQABxANEADANr9kSrABbCKijqpZXizRprp4VNrLaX6U2XQbp4p1FZyKXDcE4YasCQzdAJkN25MswVhDCrxFWsAAo7WBBdwAEQMABxANEADAAMsBer9BUXTlqOUGoRgUnh7ICsEugRwAMBLpOF5YELUaMBwGLOJ9gKO6gQbWABEDAAcQDRCjAAMsBer9BUXTiiAH33KQSmT3IBMMRz3kjVnAfPECoa5/vVdl+MLBdFQbgSFwABxTu2uRu4+zgQC3iveBAfGCAXjwgQM=")
 MANIFEST = json.dumps({
     "name": "G1 Cockpit", "short_name": "G1", "start_url": "/",
-    "display": "standalone", "background_color": "#111111",
-    "theme_color": "#111111", "lang": "ja",
+    "display": "standalone", "background_color": "#f4f5f7",
+    "theme_color": "#f4f5f7", "lang": "ja",
     "icons": [{"src": "/icon.svg", "sizes": "any", "type": "image/svg+xml"}],
 }, ensure_ascii=False)
 ICON_SVG = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
@@ -3369,44 +3369,72 @@ ICON_SVG = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
 PAGE_SIMPLE = """<!doctype html><html lang="ja"><head><meta charset="utf-8">
 <title>G1 かんたん操作</title>
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#111">
+<meta name="theme-color" content="#f4f5f7">
 <meta name="mobile-web-app-capable" content="yes">
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
 <style>
-:root{--bg:#111;--card:#1b1b1b;--line:#333;--t1:#eee;--t2:#9a9a9a;--ok:#1baf7a;--warn:#eda100;--bad:#e34948;--acc:#3987e5}
+:root{--bg:#f4f5f7;--card:#ffffff;--card2:#f7f8fa;--line:#e2e5ea;--line2:#cfd4db;--t1:#16191d;--t2:#6b7280;--ok:#15803d;--warn:#b45309;--bad:#dc2626;--acc:#1d4ed8;--bar:104px;color-scheme:light}
 *{box-sizing:border-box;margin:0}
-body{background:var(--bg);color:var(--t1);font:16px/1.5 "Segoe UI",sans-serif;padding:10px 10px 110px;max-width:720px;margin:auto;overflow-x:hidden}
-.hd{display:flex;align-items:center;gap:10px;margin-bottom:8px}
-.hd b{font-size:20px}.hd a{color:var(--acc);margin-left:auto;font-size:14px}
-.tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
-.tile{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:6px 8px;min-width:0}
-.tile .k{font-size:11px;color:var(--t2)}.tile .v{font-size:17px;font-weight:700;overflow-wrap:anywhere}
+html{-webkit-text-size-adjust:100%}
+body{background:var(--bg);color:var(--t1);font:16px/1.45 -apple-system,"Segoe UI","Hiragino Sans","Noto Sans JP",sans-serif;
+ padding:12px 14px calc(var(--bar) + env(safe-area-inset-bottom,0px));max-width:640px;margin:auto;overflow-x:hidden}
+.hd{display:flex;align-items:center;gap:10px;margin:2px 0 12px}
+.hd b{font-size:20px;letter-spacing:.02em}
+.badge{font-size:12px;color:var(--t2);border:1px solid var(--line2);border-radius:999px;padding:2px 10px;background:#fff}
+.hd a{color:var(--acc);margin-left:auto;font-size:14px;text-decoration:none;font-weight:600}
+.tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.tile{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px 10px;min-width:0}
+.tile .k{font-size:11px;color:var(--t2);letter-spacing:.06em;text-transform:uppercase}
+.tile .v{font-size:18px;font-weight:700;overflow-wrap:anywhere;line-height:1.3;font-variant-numeric:tabular-nums}
 #fsm{font-size:14px;letter-spacing:-.02em}
-.judge{margin:8px 0;padding:8px 12px;border-radius:10px;border:1px solid var(--line);font-size:14px;overflow-wrap:anywhere}
-.warnbar{margin:8px 0;padding:8px 12px;border-radius:10px;border:1px solid var(--warn);background:#2a2414;font-size:14px}
-section{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 12px;margin-top:10px}
-section h2{font-size:13px;color:var(--t2);letter-spacing:.05em;margin-bottom:8px}
-.btns3{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
-.btns2{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:8px}
-button{font:inherit;border-radius:12px;border:1px solid var(--line);background:#262626;color:var(--t1);padding:14px 8px;min-height:56px;cursor:pointer;font-weight:700}
-button:disabled{opacity:.35}
-button.go{background:var(--acc);border:none}
-button.stop{background:#7a1b1b;border:none}
-button.big{width:100%;font-size:18px;min-height:64px;margin-top:6px}
-.row{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;margin:6px 0;font-size:14px}
-input[type=number],select{font:inherit;border-radius:8px;border:1px solid var(--line);background:#262626;color:var(--t1);padding:8px}
-input[type=number]{width:84px}
-.st{font-size:13px;color:var(--t2);margin-top:8px;line-height:1.7;overflow-wrap:anywhere}
-.gate{margin-top:10px;padding:10px;border:1px solid var(--acc);border-radius:10px;background:#141c2a}
-.gate label{display:block;padding:6px 0;font-size:15px}
+.judge{margin:10px 0 0;padding:10px 12px;border-radius:12px;border:1px solid var(--line);background:#fff;font-size:14px;overflow-wrap:anywhere;line-height:1.5}
+.alert{margin:8px 0 0;padding:10px 12px;border-radius:12px;font-size:14px;line-height:1.5}
+.alert.warn{border:1px solid #f59e0b;background:#fffbeb;color:#78350f}
+.alert.bad{border:1px solid #f87171;background:#fef2f2;color:#7f1d1d}
+section{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;margin-top:12px}
+section h2{font-size:12px;color:var(--t2);letter-spacing:.1em;text-transform:uppercase;margin-bottom:10px;display:flex;align-items:center;gap:8px}
+section h2 span{font-size:12px;font-weight:600;letter-spacing:0;text-transform:none;margin-left:auto}
+.g3{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.g3 button{font-size:15px;padding:12px 4px}
+.g2{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+.row{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;margin:0 0 10px;font-size:14px;color:var(--t2)}
+.row label{display:inline-flex;align-items:center;gap:6px;color:var(--t1);max-width:100%;min-width:0}
+.row label.grow{flex:1 1 100%}
+#sel_sit{flex:1 1 auto;min-width:0;max-width:100%;text-overflow:ellipsis}
+button{font:inherit;border-radius:12px;border:1px solid var(--line2);background:#fff;color:var(--t1);padding:12px 8px;min-height:54px;cursor:pointer;font-weight:700;-webkit-tap-highlight-color:transparent;box-shadow:0 1px 0 rgba(16,24,40,.04)}
+button:active{transform:scale(.98);background:var(--card2)}
+button:disabled{opacity:.4}
+button.go{background:var(--acc);border:1px solid var(--acc);color:#fff}
+button.big{width:100%;font-size:18px;min-height:62px}
+button.sm{min-height:44px;padding:8px 6px;font-size:14px;font-weight:600}
+input[type=number],select{font:inherit;border-radius:10px;border:1px solid var(--line2);background:#fff;color:var(--t1);padding:8px 10px;min-height:40px;max-width:100%}
+input[type=number]{width:82px;font-variant-numeric:tabular-nums}
+input[type=checkbox]{width:18px;height:18px;accent-color:var(--acc)}
+.st{font-size:13px;color:var(--t2);margin-top:8px;line-height:1.6;overflow-wrap:anywhere}
+.st b{color:var(--t1)}
+.dist{margin-top:10px;padding:10px 12px;border-radius:12px;border:1px solid var(--line);background:var(--card2)}
+.dist .k{font-size:12px;color:var(--t2)}
+.dist .v{font-size:34px;font-weight:800;line-height:1.25;letter-spacing:-.01em;font-variant-numeric:tabular-nums}
+details{margin-top:10px;border:1px solid var(--line);border-radius:12px;background:var(--card2)}
+details summary{cursor:pointer;padding:10px 12px;font-size:14px;color:var(--t2);list-style:none;display:flex;align-items:center}
+details summary::-webkit-details-marker{display:none}
+details summary::after{content:"＋";margin-left:auto;color:var(--t2)}
+details[open] summary::after{content:"－"}
+details .in{padding:0 12px 12px}
+.gate{margin-top:10px;padding:10px;border:1px solid var(--acc);border-radius:12px;background:#eff4ff}
 .gi{font-size:14px;padding:2px 0}
-.log{font:12px/1.5 ui-monospace,monospace;white-space:pre-wrap;color:var(--t2);background:#161616;border-radius:8px;padding:8px;max-height:200px;overflow:auto}
-.fixbar{position:fixed;left:0;right:0;bottom:0;display:flex;gap:8px;padding:8px 10px;background:rgba(17,17,17,.97);border-top:1px solid var(--line);z-index:30}
-.fixbar button{flex:1;padding:16px 8px;font-size:18px;font-weight:900;border:none;color:#fff}
-.estop{background:var(--bad)}.stopb{background:#7a1b1b}
+.foot{margin-top:12px;font-size:12px;color:var(--t2);line-height:1.6}
+.bar{position:fixed;left:0;right:0;bottom:0;z-index:30;background:rgba(255,255,255,.94);backdrop-filter:blur(8px);border-top:1px solid var(--line2);
+ padding:10px 14px calc(10px + env(safe-area-inset-bottom,0px))}
+.bar .in{max-width:640px;margin:auto;display:grid;grid-template-columns:3fr 2fr;gap:10px}
+.bar button{min-height:64px;font-size:18px;font-weight:900;border:none;color:#fff;border-radius:14px;box-shadow:none}
+.bar .estop{background:var(--bad);box-shadow:0 0 0 3px #fecaca}
+.bar .wstop{background:#1f2937}
+.bar .k{display:block;font-size:11px;font-weight:600;opacity:.85;margin-bottom:2px}
+#ka{position:fixed;width:2px;height:2px;opacity:.02;left:0;bottom:0;pointer-events:none}
 </style></head><body>
-<div class="hd"><b>&#129302; G1</b><span id="mode" class="st" style="margin:0"></span><a href="/detail">詳細画面 &rarr;</a></div>
+<div class="hd"><b>&#129302; G1</b><span id="mode" class="badge">-</span><a href="/detail">詳細画面 &rarr;</a></div>
 <div class="tiles">
  <div class="tile"><div class="k">FSM</div><div class="v" id="fsm">-</div></div>
  <div class="tile"><div class="k">傾き</div><div class="v" id="tilt">-</div></div>
@@ -3414,78 +3442,82 @@ input[type=number]{width:84px}
  <div class="tile"><div class="k">通信</div><div class="v" id="comm">-</div></div>
 </div>
 <div id="go" class="judge">-</div>
-<div id="uiloss" class="warnbar" hidden></div>
-<div id="seatdoubt" hidden style="background:#5a1b1b;color:#ffd6d6;border:1px solid #c33;border-radius:8px;padding:8px 10px;margin:6px 0;font-size:14px"></div>
+<div id="uiloss" class="alert warn" hidden></div>
+<div id="seatdoubt" class="alert bad" hidden></div>
 
 <section><h2>基本操作</h2>
- <div class="btns3">
+ <div class="g3">
   <button onclick="cmd('mode_damp')">ダンプ</button>
   <button onclick="cmd('mode_stand')">スタンドロック</button>
   <button onclick="cmd('walk_ready')">歩行モード</button>
  </div>
- <div class="st">スタンドロック=立位(FSM4)。歩行モード=内蔵の通常運控(501、だめなら200)へ入れて静止立位モードにする。押すと歩き出しうるので接地とE-STOPを確認。着座は自動で 802→UserCtrl を通る。</div>
+ <div class="st">スタンドロック＝立位(FSM4)。歩行モード＝内蔵の歩行(501)へ入れて静止立位。押すと歩き出しうるので接地と E-STOP を確認。</div>
 </section>
 
-<section><h2>歩く</h2>
+<section><h2>歩く <span id="walkhead">-</span></h2>
  <div class="row">
-  <label>速さ <select id="w_speed" onchange="cmd('walk_param',JSON.stringify({v_fwd:+this.value}))"><option value="0.5">ゆっくり 0.5</option><option value="0.7" selected>ふつう 0.7</option><option value="0.9">はやい 0.9</option></select>（指令の上限）</label>
-  <label>壁の手前で止まる距離 <input id="w_stop" type="number" step="0.05" min="0.3" max="2.5" value="0.60"> m</label>
-  <label>横歩き <select id="w_dir"><option value="left">左へ</option><option value="right">右へ</option></select>
-   <input id="w_side" type="number" step="0.05" min="0.02" max="3" value="0.50"> m</label>
+  <label>速さ <select id="w_speed" onchange="cmd('walk_param',JSON.stringify({v_fwd:+this.value}))"><option value="0.5">ゆっくり</option><option value="0.7" selected>ふつう</option><option value="0.9">はやい</option></select></label>
+  <label>壁の手前 <input id="w_stop" type="number" step="0.05" min="0.3" max="2.5" value="0.60"> m で止まる</label>
   <label><input id="w_avoid" type="checkbox" checked> 障害物は回り込む</label>
  </div>
- <div class="btns3">
-  <button class="go" id="b_fwd" onclick="walkGo('forward')">&#9650; 前進</button>
-  <button class="go" id="b_side" onclick="walkGo('side')">&#9664;&#9654; 横歩き</button>
-  <button class="stop" onclick="cmd('walk_stop')">&#9632; 歩行停止</button>
+ <div class="row">
+  <label>横歩き <select id="w_dir"><option value="left">左へ</option><option value="right">右へ</option></select>
+   <input id="w_side" type="number" step="0.05" min="0.02" max="3" value="0.50"> m</label>
  </div>
- <div class="st" style="margin:8px 0 2px">微調整(10cm 以下)は 1 歩ずつ、それ以上は普通の歩行。[1歩] は 1 歩だけ出して何cm動くかを見る。
-  <span id="stepinfo">-</span></div>
- <div class="btns3">
-  <button onclick="step1('left')">&#9664; 左へ1歩</button>
-  <button onclick="step1('back')">&#9660; 後ろへ1歩</button>
-  <button onclick="step1('right')">右へ1歩 &#9654;</button>
+ <div class="g2">
+  <button class="go big" id="b_fwd" onclick="walkGo('forward')">&#9650; 前進</button>
+  <button class="go big" id="b_side" onclick="walkGo('side')">&#9664;&#9654; 横歩き</button>
  </div>
- <div class="btns2">
-  <button onclick="nudge('left')">&#9664; 左へ5cm</button>
-  <button onclick="nudge('right')">右へ5cm &#9654;</button>
- </div>
- <div id="walldist" style="margin-top:8px;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:#161616">
-  <div class="st" style="margin:0">正面の壁までの距離（つま先から、壁の面を当てて測る） — LiDAR は自動で読んでいます</div>
-  <div style="font-size:34px;font-weight:800;line-height:1.2" id="walldist_v">-</div>
+ <div class="dist">
+  <div class="k">正面の壁まで（つま先から）</div>
+  <div class="v" id="walldist_v">-</div>
   <div class="st" id="walldist_o" style="margin:0;color:var(--warn)"></div>
-  <div class="st" id="walldist_s" style="margin:0">-</div>
-  <div class="st" id="walldist_d" style="margin:4px 0 0">前 - / 後 - / 左 - / 右 -</div>
-  <div class="row" style="margin-top:6px"><button onclick="if(confirm('LiDAR の前後を反転します。正面の壁の数字が「後ろ」の距離と入れ替わります。よいですか？'))cmd('lidar_flip')" style="min-height:40px">⇄ 前後を反転（数字が後ろの壁と合っているとき）</button></div>
+  <div class="st" id="walldist_d" style="margin:2px 0 0">前 - / 後 - / 左 - / 右 -</div>
+  <div class="st" id="walldist_s" style="margin:2px 0 0">-</div>
  </div>
  <div id="walkst" class="st">-</div>
+ <details>
+  <summary>微調整（1歩・5cm）</summary>
+  <div class="in">
+   <div class="st" style="margin:0 0 8px" id="stepinfo">-</div>
+   <div class="g3">
+    <button class="sm" onclick="step1('left')">&#9664; 左へ1歩</button>
+    <button class="sm" onclick="step1('back')">&#9660; 後ろへ1歩</button>
+    <button class="sm" onclick="step1('right')">右へ1歩 &#9654;</button>
+   </div>
+   <div class="g2" style="margin-top:8px">
+    <button class="sm" onclick="nudge('left')">&#9664; 左へ5cm</button>
+    <button class="sm" onclick="nudge('right')">右へ5cm &#9654;</button>
+   </div>
+   <div class="st">10cm 以下は 1 歩ずつ、それ以上は普通の歩行。[1歩] は 1 歩だけ出して何 cm 動くかを見る。</div>
+  </div>
+ </details>
 </section>
 
 <section><h2>座る</h2>
- <div class="row">方策 <select id="sel_sit" onchange="sel('sit')"></select></div>
- <div class="row">椅子との距離を詰める（歩行モードで。後ろは LiDAR が見えないので目で見る）
-  <button onclick="nudgeBack(0.05)" style="min-height:44px">▼ 後ろへ5cm</button>
-  <button onclick="nudgeBack(0.10)" style="min-height:44px">▼ 後ろへ10cm</button></div>
+ <div class="row"><label class="grow">方策 <select id="sel_sit" onchange="sel('sit')"></select></label></div>
+ <div class="row"><span>椅子との距離を詰める（後ろは LiDAR が見えないので目で見る）</span></div>
+ <div class="g2" style="margin-bottom:10px">
+  <button class="sm" onclick="nudgeBack(0.05)">&#9660; 後ろへ5cm</button>
+  <button class="sm" onclick="nudgeBack(0.10)">&#9660; 後ろへ10cm</button>
+ </div>
  <button class="go big" id="sit_btn" onclick="cmd('sit_check')">&#129681; 着座（点検のあと 3 秒後に開始）</button>
  <div id="sitgate" class="gate" hidden>
   <div id="gate_items"></div>
-  <div class="st" style="margin:4px 0">椅子が真後ろにあること・周囲に人がいないこと・リモコンのE-STOPを握っていることを見てから押してください。点検に × が無ければ 3 秒後に自動で着座を始めます。</div>
-  <div class="btns2"><button class="go" id="gate_go" onclick="sitGo()" disabled>着座を開始（3秒後）</button><button onclick="gateCancel()">やめる</button></div>
+  <div class="st" style="margin:4px 0">椅子が真後ろにあること・周囲に人がいないこと・リモコンの E-STOP を握っていることを見てから。点検に × が無ければ 3 秒後に自動で着座を始めます。</div>
+  <div class="g2"><button class="go" id="gate_go" onclick="sitGo()" disabled>着座を開始（3秒後）</button><button onclick="gateCancel()">やめる</button></div>
   <div id="gate_cd" class="st"></div>
  </div>
  <div id="sitst" class="st">-</div>
 </section>
 
-<section><h2>通信が切れたときの動作（いまの状態）</h2><div id="uiplan" class="st">-</div>
- <div class="st">物理E-STOP（リモコン）が最上位。傾き40度・受信断・送信断は従来どおり即ダンプ。</div></section>
-<section><h2>ログ</h2><div id="log" class="log"></div>
- <div class="st">画面消灯防止: <span id="ka_st">-</span>
- <video id="ka" src="/keepawake.webm" loop muted playsinline style="width:64px;height:48px;vertical-align:middle;opacity:.5;border-radius:6px"></video></div></section>
+<div class="foot">通信が切れたとき: <span id="uiplan">-</span>　／　画面消灯防止: <span id="ka_st">-</span><br>物理 E-STOP（リモコン）が最上位。傾き 40 度・受信断・送信断は即ダンプ。</div>
+<video id="ka" src="/keepawake.webm" loop muted playsinline></video>
 
-<div class="fixbar">
- <button class="estop" onclick="cmd('estop')">&#9632; E-STOP</button>
- <button class="stopb" onclick="cmd('walk_stop')">&#9632; 歩行停止</button>
-</div>
+<div class="bar"><div class="in">
+ <button class="estop" onclick="cmd('estop')"><span class="k">全停止</span>&#9632; E-STOP</button>
+ <button class="wstop" onclick="cmd('walk_stop')"><span class="k">歩行だけ止める</span>&#9632; 歩行停止</button>
+</div></div>
 
 <script>
 let S={}, META=null, LASTOK=0, GATE_T=null, CD=null;
@@ -3507,18 +3539,18 @@ function drawWall(w){
  const v=document.getElementById('walldist_v'), s=document.getElementById('walldist_s'); if(!v)return;
  const p=w.params||{}, sd=p.stop_dist||0.6;
  const lidarOK=(w.lidar_age_ms!=null&&w.lidar_age_ms<1500);
- if(!lidarOK){ v.textContent='LiDAR 未受信'; v.style.color='var(--bad)'; s.textContent='点群が来ていません。機体の lidar_bridge を確認'; return; }
  const o=document.getElementById('walldist_o'), dd=document.getElementById('walldist_d');
+ if(!lidarOK){ v.textContent='LiDAR 未受信'; v.style.color='var(--bad)'; s.textContent='点群が来ていません。機体の lidar_bridge を確認'; if(o)o.textContent=''; return; }
  const wd=w.wall_dist, od=w.dist;
- if(wd!=null){ v.textContent=wd.toFixed(2)+' m（壁'+(w.wall_ang!=null&&Math.abs(w.wall_ang)>=8?'、'+Math.abs(w.wall_ang)+'° 斜め':'')+'）';
+ if(wd!=null){ v.textContent=wd.toFixed(2)+' m'+(w.wall_ang!=null&&Math.abs(w.wall_ang)>=8?'（壁が '+Math.abs(w.wall_ang)+'° 斜め）':'');
    const near=(od!=null&&od<wd-0.15);
    const ref=near?od:wd; v.style.color=(ref<=sd)?'var(--bad)':(ref<=sd+0.5?'var(--warn)':'var(--ok)');
    if(o) o.textContent=near?('手前 '+od.toFixed(2)+' m に障害物'+(w.width!=null?'（幅 '+w.width+' m）':'')+' — 止まるのはこちら'):''; }
- else if(od==null){ v.textContent='3m 以内に なし'; v.style.color='var(--ok)'; if(o)o.textContent=''; }
+ else if(od==null){ v.textContent='3 m 以内に なし'; v.style.color='var(--ok)'; if(o)o.textContent=''; }
  else { v.textContent=od.toFixed(2)+' m'+(w.wall?'（壁）':(w.width!=null?'（幅 '+w.width+' m の障害物）':'')); v.style.color=(od<=sd)?'var(--bad)':(od<=sd+0.5?'var(--warn)':'var(--ok)'); if(o)o.textContent='壁の面は取れていません（手前の物までの距離）'; }
- if(dd&&w.dirs){ const f=x=>(x==null?'-':x.toFixed(2)); const si=w.stop_info; dd.textContent='前 '+f(w.dirs.front)+' / 後 '+f(w.dirs.back)+' / 左 '+f(w.dirs.left)+' / 右 '+f(w.dirs.right)+' m（±20°の最近点、つま先から）'+(w.yaw_fix_deg?'　ヨー補正 '+w.yaw_fix_deg+'°':'')+(si?'　直前の停止: ゼロ時 '+f(si.d0)+' → 静止 '+f(si.d1)+' → 3秒後 '+f(si.d2)+(si.t_settle!=null?'（'+si.t_settle.toFixed(1)+'秒で静止）':'（静止を確認できず）'):''); }
- s.textContent='停止距離 '+sd.toFixed(2)+' m　LiDAR '+w.lidar_age_ms+'ms 点'+(w.n_obs||0)+' 床 '+(w.floor_h==null?'-':w.floor_h+'m')
-  +(w.mount?'　取付: 高さ'+w.mount.height+'m 傾き'+w.mount.tilt_deg+'°':'')+(w.free_l!=null||w.free_r!=null?'　回り込み可 '+(w.free_l!=null?'左':'')+(w.free_r!=null?'右':''):'');
+ if(dd&&w.dirs){ const f=x=>(x==null?'-':x.toFixed(2)); dd.textContent='前 '+f(w.dirs.front)+' / 後 '+f(w.dirs.back)+' / 左 '+f(w.dirs.left)+' / 右 '+f(w.dirs.right)+' m'; }
+ const si2=w.stop_info; const f2=x=>(x==null?'-':x.toFixed(2));
+ s.textContent='停止距離 '+sd.toFixed(2)+' m　LiDAR '+w.lidar_age_ms+' ms'+(si2?'　直前の停止: '+f2(si2.d0)+' → '+f2(si2.d1)+' → '+f2(si2.d2)+' m'+(si2.t_settle!=null?'（'+si2.t_settle.toFixed(1)+' 秒で静止）':''):'');
 }
 function gateUpd(){
  const g=S.sit_gate;
@@ -3541,24 +3573,25 @@ async function tick(){
  if(!META){await loadMeta();if(!META)return}
  let d; try{d=await(await fetch('/state')).json()}catch(e){ drawComm(false); return }
  S=d; LASTOK=Date.now(); drawComm(true); fillSit(d);
- document.getElementById('mode').textContent=d.is_sim?'[SIMモック]':'[実機]';
+ document.getElementById('mode').textContent=d.is_sim?'SIM モック':'実機';
  const f=document.getElementById('fsm'); f.textContent=d.fsm; f.style.color=d.fsm==='DAMP'?'var(--bad)':(d.fsm==='RUNNING'?'var(--ok)':'var(--t1)');
  const te=document.getElementById('tilt'); te.textContent=d.tilt_deg.toFixed(0)+'°'; te.style.color=d.tilt_deg>25?'var(--warn)':'var(--t1)';
- const lp=d.loop||{}, le=document.getElementById('loop'); le.textContent=(lp.hz?lp.hz.toFixed(0):'-')+'Hz'; le.style.color=lp.ok?'var(--ok)':'var(--bad)';
+ const lp=d.loop||{}, le=document.getElementById('loop'); le.textContent=(lp.hz?lp.hz.toFixed(0):'-')+' Hz'; le.style.color=lp.ok?'var(--ok)':'var(--bad)';
  const g=d.go||{ok:true,ng:[],warn:[]}, ge=document.getElementById('go');
- if(g.ng&&g.ng.length){ge.style.borderColor='var(--bad)';ge.style.background='#2a1414';ge.innerHTML='<b style="color:var(--bad)">■ 実行できません</b> '+g.ng.map(x=>'・'+x).join(' ');}
- else if(g.warn&&g.warn.length){ge.style.borderColor='var(--warn)';ge.style.background='#2a2414';ge.innerHTML='<b style="color:var(--warn)">▲ 要注意</b> '+g.warn.map(x=>'・'+x).join(' ');}
- else{ge.style.borderColor='var(--ok)';ge.style.background='#142a1e';ge.innerHTML='<b style="color:var(--ok)">● 実行してよい状態です</b>';}
+ if(g.ng&&g.ng.length){ge.style.borderColor='var(--bad)';ge.style.background='#fef2f2';ge.innerHTML='<b style="color:var(--bad)">■ 実行できません</b> '+g.ng.map(x=>'・'+x).join(' ');}
+ else if(g.warn&&g.warn.length){ge.style.borderColor='var(--warn)';ge.style.background='#fffbeb';ge.innerHTML='<b style="color:var(--warn)">▲ 要注意</b> '+g.warn.map(x=>'・'+x).join(' ');}
+ else{ge.style.borderColor='var(--ok)';ge.style.background='#f0fdf4';ge.innerHTML='<b style="color:var(--ok)">● 実行してよい状態です</b>';}
  const ul=document.getElementById('uiloss');
- if(d.ui_lost_last){ul.hidden=false; ul.innerHTML='<b>通信が '+d.ui_lost_last.dur+' 秒途絶えていました('+d.ui_lost_last.t+')</b><br>途絶中の対応: '+d.ui_lost_last.what;} else ul.hidden=true; const sd=document.getElementById('seatdoubt'); if(sd){ if(d.seat_doubt){sd.hidden=false; sd.innerHTML='<b>★座面に載っていない疑い</b>: '+d.seat_doubt+'<br>自動ダンプは保留。方策で保持中 — 目視で確認して [ダンプ] か [スタンドロック]';} else sd.hidden=true; }
+ if(d.ui_lost_last){ul.hidden=false; ul.innerHTML='<b>通信が '+d.ui_lost_last.dur+' 秒途絶えていました('+d.ui_lost_last.t+')</b><br>途絶中の対応: '+d.ui_lost_last.what;} else ul.hidden=true;
+ const sd=document.getElementById('seatdoubt'); if(sd){ if(d.seat_doubt){sd.hidden=false; sd.innerHTML='<b>★座面に載っていない疑い</b>: '+d.seat_doubt+'<br>自動ダンプは保留。方策で保持中 — 目視で確認して [ダンプ] か [スタンドロック]';} else sd.hidden=true; }
  document.getElementById('uiplan').textContent=d.ui_plan||'-';
  const w=d.walk||{}, p=w.params||{};
- const dist=(w.dist==null?'なし(3m以内)':w.dist.toFixed(2)+'m'+(w.wall?'（壁）':(w.width!=null?'（幅'+w.width+'m の障害物）':'')));
+ const dist=(w.dist==null?'なし(3m以内)':w.dist.toFixed(2)+' m'+(w.wall?'（壁）':(w.width!=null?'（幅 '+w.width+' m の障害物）':'')));
+ const wh=document.getElementById('walkhead'); if(wh){ wh.textContent=w.ready?('準備OK · FSM '+w.fsm_id):'未準備 — [歩行モード] を押す'; wh.style.color=w.ready?'var(--ok)':'var(--warn)'; }
  document.getElementById('walkst').innerHTML=
-  '歩行 <b>'+(w.ready?'準備OK(FSM '+w.fsm_id+')':'未準備 — [歩行モード]を押す')+'</b>'
-  +(w.auto?' <b style="color:var(--acc)">実行中 '+w.phase+'</b>':'')
-  +'<br>前方 <b style="color:'+((w.dist!=null&&w.dist<=(p.stop_dist||0.6))?'var(--bad)':'var(--ok)')+'">'+dist+'</b>'
-  +' 速度 '+(w.v||0)+' m/s　進み '+(w.traveled||0)+'m　ずれ '+((w.offset||0)*100).toFixed(0)+'cm　回り込み '+(w.detours||0)+'回'
+  (w.auto?'<b style="color:var(--acc)">実行中 '+w.phase+'</b>　':'')
+  +'前方 <b style="color:'+((w.dist!=null&&w.dist<=(p.stop_dist||0.6))?'var(--bad)':'var(--ok)')+'">'+dist+'</b>'
+  +'　速度 '+(w.v||0)+' m/s　進み '+(w.traveled||0)+' m　ずれ '+((w.offset||0)*100).toFixed(0)+' cm　回り込み '+(w.detours||0)+' 回'
   +'<br>LiDAR '+(w.lidar_age_ms==null?'<b style="color:var(--bad)">未受信</b>':(w.lidar_age_ms<1500?'OK':'<b style="color:var(--bad)">途絶</b>'))
   +'　odom '+(w.odom_age_ms==null?'<b style="color:var(--bad)">未受信</b>':(w.odom_age_ms<800?'OK':'<b style="color:var(--bad)">途絶</b>'))
   +(w.msg?'<br>'+w.msg:'');
@@ -3575,7 +3608,6 @@ async function tick(){
   gateUpd();
   if(fresh&&gt.ok&&!CD&&gt.age<10){sitGo();}
  } else if(!CD){gp.hidden=true;}
- document.getElementById('log').textContent=(d.logs||[]).slice(-10).join(String.fromCharCode(10));
 }
 function drawComm(ok){const c=document.getElementById('comm'); if(!c)return;
  const age=(Date.now()-LASTOK)/1000;
@@ -3583,8 +3615,8 @@ function drawComm(ok){const c=document.getElementById('comm'); if(!c)return;
 let WL=null;
 function setKA(s){const e=document.getElementById('ka_st');if(e)e.textContent=s}
 async function keepAwake(){
- if('wakeLock' in navigator){try{WL=await navigator.wakeLock.request('screen');WL.addEventListener('release',function(){WL=null;setKA('解除(タップで再取得)')});setKA('WakeLock有効');return}catch(e){}}
- const v=document.getElementById('ka'); if(v){v.play().then(function(){setKA('動画で維持中(端末のスリープも長めに)')}).catch(function(){setKA('★無効 — 端末のスリープ設定を長くすること')})}
+ if('wakeLock' in navigator){try{WL=await navigator.wakeLock.request('screen');WL.addEventListener('release',function(){WL=null;setKA('解除(タップで再取得)')});setKA('WakeLock 有効');return}catch(e){}}
+ const v=document.getElementById('ka'); if(v){v.play().then(function(){setKA('動画で維持中')}).catch(function(){setKA('★無効 — 端末のスリープ設定を長くすること')})}
 }
 setInterval(tick,250);tick();
 setInterval(function(){cmd('beat')},1000);
