@@ -258,6 +258,7 @@ CMD_ALLOW = (
     "walk_go", "sit_check", "sit_go", "hbdrop",              # かんたん画面と途絶の模擬
     "cfade",                                                 # 接触後の膝・足首の残差抜き
     "lidar_flip",                                            # LiDAR の前後を反転。lidar_mount.json に書く
+    "climb_check", "climb_go",                               # かんたん画面: 後ろ向き登りの点検と開始(2026-09-07)
 )
 CONTACT_FADE_MIN_T = 85           # 接触後フェードの検知を許す最初のコマ。参照の座面到達1.9秒の少し前
 SEAT_KT_MAX = 18.0                # 完了時: 終端0.5秒の両膝トルク中央値がこれ以上なら「脚に体重が残っている」
@@ -543,6 +544,7 @@ class Engine:
         self._ui_action_t = 0.0
         self._beat_ignore_until = 0.0       # 途絶の模擬(hbdrop。シムでの手順確認用)
         self.sit_gate = None                # 着座前の確認(sit_check)の結果とトークン
+        self.climb_gate = None              # 後ろ向き登り前の確認(climb_check)の結果とトークン(かんたん画面)
         self._want_arm = False           # ワーカーの準備物をループが取り込む
         self._armed_bundle = None
         self._want_begin = None          # 開始するフェーズ番号
@@ -1209,6 +1211,90 @@ class Engine:
         else:
             self._spawn("単体実行 sit", lambda: self._do_run_task("sit"))
 
+    def _do_climb_check(self):
+        """[後ろ向きに段を登る]: かんたん画面の点検(サーバ側)。結果は climb_gate。30 秒以内の同じトークンで climb_go"""
+        avail = [n for n in list_patterns().get("climb", []) if n.startswith("climb_back")]
+        if not avail:
+            self.log("★後ろ向き登りの方策(climb_back_*)が deploy に無い")
+            return
+        name = "climb_back_B" if "climb_back_B" in avail else avail[0]
+        self.sel["climb"] = name
+        items = []
+        g = self._go_check()
+        for s_ in g["ng"]:
+            if s_.startswith("処理中(登り前の確認"):
+                continue
+            items.append([False, s_])
+        ck = self._clock_check()
+        if ck is not None:
+            items.append(ck)
+        for s_ in g["warn"]:
+            items.append([None, s_])
+        q, dq, quat, gyro, tau = self.robot.state()
+        up_z = float(quat_to_mat(quat)[2, 2])
+        tilt = float(np.degrees(np.arccos(min(1.0, max(-1.0, up_z)))))
+        items.append([tilt < 10.0, f"傾き {tilt:.1f}度(10度未満)"])
+        rms = float(np.sqrt(np.mean(dq ** 2)))
+        items.append([rms < 0.10, f"静止(関節速度RMS {rms:.3f}、0.10未満)"])
+        f = self.robot.get_fsm_id() if hasattr(self.robot, "get_fsm_id") else None
+        self._fsm_id = f
+        items.append([(f is None) or (f in (4, 200, 500, 501, 801, 802, 1000)),
+                      f"内蔵FSM {f}(立位/歩行/UserCtrlのどれか)" if f is not None else "内蔵FSM 読めず(simなど)"])
+        try:
+            with np.load(DEPLOY / name / "reference.npz") as z:
+                rq0 = np.asarray(z["ref_q"][0], dtype=float)
+                rquat0 = np.asarray(z["ref_quat"][0], dtype=float)
+            d = float(np.abs(q[:15] - rq0[:15]).max())
+            items.append([d < 0.6, f"開始姿勢との差 {np.degrees(d):.0f}度(35度未満)" + ("" if d < 0.6 else
+                          " — この方策は参照の開始姿勢(右股ヨー −52°・股ロール −18°)からしか登れない。通常の立位から始めると"
+                          "学習環境で 0/20、先に PD で寄せても寄せている途中で倒れる(2026-09-07)。学習側で開始区間の作り直しが要る")])
+            Rm = quat_to_mat(quat)
+            yaw_imu = float(np.arctan2(Rm[1, 0], Rm[0, 0]))
+            Rr = quat_to_mat(rquat0)
+            yaw_ref = float(np.arctan2(Rr[1, 0], Rr[0, 0]))
+            dy = float(np.degrees((yaw_ref - yaw_imu + np.pi) % (2 * np.pi) - np.pi))
+            items.append([None, f"参照との向きのずれ {dy:+.1f}度(開始時に自動で合わせる。段が真後ろかは目視)"])
+        except Exception as e:                     # noqa: BLE001
+            items.append([False, f"参照が読めない: {e}"])
+        items.append([None, "段: 高さ 0.21m・奥行 0.38m を想定。踵が段の前縁に触れる位置(後ろ下は LiDAR の死角。目視)"])
+        items.append([None, "★初回はハーネス(吊り)必須。脚のゲインは学習値(kp400)で固い"])
+        ok = all(it[0] is not False for it in items)
+        import random
+        token = f"{int(time.time())}-{random.randint(1000, 9999)}"
+        self.climb_gate = dict(ok=ok, items=items, token=token, t=time.time(), pattern=name)
+        self.log("後ろ向き登り前の確認: " + ("OK(操作者の確認へ)" if ok else "★NGあり") + " / "
+                 + " / ".join(("○" if it[0] else ("×" if it[0] is False else "△")) + it[1] for it in items))
+
+    def _do_climb_go(self, arg):
+        """確認済みトークンで後ろ向き登りを始める(50Hzループから。実行本体はワーカー)"""
+        g = self.climb_gate
+        if g is None or not arg or arg != g["token"]:
+            self.log("★登りの確認が無い/古い。もう一度[後ろ向きに段を登る]から")
+            return
+        if time.time() - g["t"] > 30.0:
+            self.climb_gate = None
+            self.log("★確認から30秒以上経ちました。もう一度[後ろ向きに段を登る]から")
+            return
+        if not g["ok"]:
+            self.log("★確認でNGがあるので始めません")
+            return
+        if self.sel["climb"] != g["pattern"]:
+            self.climb_gate = None
+            self.log("★確認後に方策が変わりました。もう一度[後ろ向きに段を登る]から")
+            return
+        self.climb_gate = None
+        self.log(f"後ろ向き登りを開始します(確認済み、{g['pattern']}。着座と同じ手順: UserCtrl → すぐ方策)")
+        if hasattr(self.robot, "enter_user_ctrl"):
+            self._spawn("UserCtrl→climb", lambda: self._do_user_run("climb"))
+        else:
+            self._spawn("単体実行 climb", lambda: self._do_run_task("climb"))
+
+    def _do_climb_run(self):
+        """後ろ向き登り: 着座と同じ手順(UserCtrl 取得 → 待たずに方策を開始)。
+        参照の開始姿勢へは PD で寄せるのではなく、走りながら参照ブレンド(ref_blend_s)で滑らかに寄せる
+        (PD 保持はバランスが無く、3 秒で 37 度傾いた実測がある。着座はこの手順で完走 34/40)"""
+        self._do_user_run("climb")
+
     def _seat_check(self, name):
         """完了時に座面に載っているかの証拠を見る。疑いがあれば理由文、無ければ None。
         証拠 = 終端0.5秒の両膝トルク中央値が小さい(体重が脚に残っていない)+ 骨盤の後退(sit_shape)。"""
@@ -1679,6 +1765,10 @@ class Engine:
                 self.log(f"★LiDAR の反転に失敗: {e}")
         elif cmd == "walk_go":                     # かんたん画面: 前進 / 横歩き / 5cm
             self._spawn("歩行 開始", lambda a=arg: self._do_walk_go(a))
+        elif cmd == "climb_check":                 # かんたん画面: 後ろ向き登り前の確認
+            self._spawn("登り前の確認", self._do_climb_check)
+        elif cmd == "climb_go":
+            self._do_climb_go(arg)
         elif cmd == "sit_check":                   # かんたん画面: 着座前の確認
             self._spawn("着座前の確認", self._do_sit_check)
         elif cmd == "sit_go":
@@ -2681,6 +2771,10 @@ class Engine:
                 "ui_lost_s": (round(time.time() - self._ui_lost_t, 1) if self._ui_lost else 0.0),
                 "ui_lost_last": self._ui_lost_last,
                 "ui_plan": self._ui_loss_plan(),
+                "climb_gate": (None if self.climb_gate is None else
+                               {"ok": self.climb_gate["ok"], "items": self.climb_gate["items"],
+                                "token": self.climb_gate["token"], "pattern": self.climb_gate["pattern"],
+                                "age": round(time.time() - self.climb_gate["t"], 1)}),
                 "sit_gate": (None if self.sit_gate is None else
                              {"ok": self.sit_gate["ok"], "items": self.sit_gate["items"],
                               "token": self.sit_gate["token"], "pattern": self.sit_gate["pattern"],
@@ -3555,6 +3649,18 @@ details .in{padding:0 12px 12px}
  <div id="sitst" class="st">-</div>
 </section>
 
+<section><h2>登る（後ろ向き） <span id="climbhead">-</span></h2>
+ <div class="row"><span>段に背を向け、踵が段の前縁に触れる位置で（段の高さ 0.21 m・奥行 0.38 m を想定）。後ろ下は LiDAR の死角なので目で合わせる。<b>初回はハーネス（吊り）必須。</b></span></div>
+ <button class="go big" id="climb_btn" onclick="cmd('climb_check')">&#129700; 後ろ向きに段を登る（点検のあと 3 秒後に開始）</button>
+ <div id="climbgate" class="gate" hidden>
+  <div id="cgate_items"></div>
+  <div class="st" style="margin:4px 0">周囲に人がいないこと・ハーネスで支えていること・リモコンの E-STOP を握っていることを見てから。点検に × が無ければ 3 秒後に、着座と同じ手順で制御権を取ってすぐ登り始めます（約 5 秒）。登り切ったら方策が立位を保持します。降ろすときは支えてから [ダンプ]。</div>
+  <div class="g2"><button class="go" id="cgate_go" onclick="climbGo()" disabled>登りを開始（3秒後）</button><button onclick="climbCancel()">やめる</button></div>
+  <div id="cgate_cd" class="st"></div>
+ </div>
+ <div id="climbst" class="st">-</div>
+</section>
+
 <div class="foot">通信が切れたとき: <span id="uiplan">-</span>　／　画面消灯防止: <span id="ka_st">-</span><br>物理 E-STOP（リモコン）が最上位。傾き 40 度・受信断・送信断は即ダンプ。</div>
 <video id="ka" src="/keepawake.webm" loop muted playsinline></video>
 
@@ -3564,7 +3670,7 @@ details .in{padding:0 12px 12px}
 </div></div>
 
 <script>
-let S={}, META=null, LASTOK=0, GATE_T=null, CD=null;
+let S={}, META=null, LASTOK=0, GATE_T=null, CD=null, CGATE_T=null, CCD=null;
 function cmd(c,a){fetch('/cmd?c='+c+(a?('&a='+encodeURIComponent(a)):''),{method:'POST'}).catch(function(){})}
 function sel(k){cmd('select',k+':'+document.getElementById('sel_'+k).value)}
 function walkGo(mode){
@@ -3610,6 +3716,16 @@ function sitGo(){
   clearInterval(CD);CD=null; e.textContent='開始しました'; cmd('sit_go',g.token);
   setTimeout(gateCancel,1500); },1000);
 }
+function cgateUpd(){ const g=S.climb_gate; const b=document.getElementById('cgate_go'); if(b)b.disabled=!(g&&g.ok&&!CCD); }
+function climbCancel(){ if(CCD){clearInterval(CCD);CCD=null;} CGATE_T=null; document.getElementById('climbgate').hidden=true; document.getElementById('cgate_cd').textContent=''; }
+function climbGo(){
+ const g=S.climb_gate; if(!g||!g.ok)return;
+ let n=3; const e=document.getElementById('cgate_cd'); e.textContent='3秒後に登りを開始します… [やめる]で中止';
+ document.getElementById('cgate_go').disabled=true;
+ CCD=setInterval(function(){ n--; if(n>0){e.textContent=n+'秒後に登りを開始します… [やめる]で中止';return}
+  clearInterval(CCD);CCD=null; e.textContent='開始しました'; cmd('climb_go',g.token);
+  setTimeout(climbCancel,2500); },1000);
+}
 async function loadMeta(){try{const m=await(await fetch('/state?meta=1')).json();META={patterns:m.patterns,notes:m.notes}}catch(e){}}
 function fillSit(d){const e=document.getElementById('sel_sit'); if(!e||e.dataset.done||!META)return; e.dataset.done=1;
  e.innerHTML=META.patterns.sit.map(x=>'<option value="'+x+'" '+(x===d.sel.sit?'selected':'')+'>'+x+(META.notes[x]?' — '+META.notes[x].slice(0,40):'')+'</option>').join('');}
@@ -3652,7 +3768,21 @@ async function tick(){
   gateUpd();
   if(fresh&&gt.ok&&!CD&&gt.age<10){sitGo();}
  } else if(!CD){gp.hidden=true;}
+ const cg=d.climb_gate, cgp=document.getElementById('climbgate');
+ let cfresh=false;
+ if(cg&&(cg.token!==CGATE_T)){CGATE_T=cg.token; cfresh=true; document.getElementById('cgate_cd').textContent='';}
+ if(cg){cgp.hidden=false;
+  document.getElementById('cgate_items').innerHTML='<div class="gi"><b>'+(cg.ok?'点検OK — 3秒後に登りを開始します':'★点検NG — 直してからもう一度')+'</b>（'+cg.pattern+'、'+cg.age+'秒前）</div>'
+   +cg.items.map(it=>'<div class="gi" style="color:'+(it[0]===false?'var(--bad)':(it[0]===null?'var(--warn)':'var(--ok)'))+'">'+(it[0]===false?'×':(it[0]===null?'△':'○'))+' '+it[1]+'</div>').join('');
+  if(cg.age>30){climbCancel();}
+  cgUpd_();
+  if(cfresh&&cg.ok&&!CCD&&cg.age<10){climbGo();}
+ } else if(!CCD){cgp.hidden=true;}
+ const ch=document.getElementById('climbhead'); if(ch){ ch.textContent=(d.sel&&d.sel.climb&&String(d.sel.climb).startsWith('climb_back'))?d.sel.climb:'climb_back_B'; }
+ const cs=document.getElementById('climbst'); if(cs){ const ph=(d.phases||[]); const isC=ph.length&&String(ph[0]).startsWith('climb');
+  cs.innerHTML=(isC?('方策 '+ph.join(' → ')+'　コマ '+d.t+'/'+d.n+'　'+(d.fsm==='RUNNING'?'<b style="color:var(--acc)">登り中</b>':(d.fsm==='HOLD'?'<b style="color:var(--ok)">登り切って保持中</b>':d.fsm))+'<br>'):'')+(isC&&d.msg?d.msg:(d.fsm==='MOVING'?'開始姿勢へ寄せています':'-')); }
 }
+function cgUpd_(){cgateUpd();}
 function drawComm(ok){const c=document.getElementById('comm'); if(!c)return;
  const age=(Date.now()-LASTOK)/1000;
  if(ok||age<3){c.textContent='OK';c.style.color='var(--ok)';} else {c.textContent='途絶 '+age.toFixed(0)+'s';c.style.color='var(--bad)';}}
