@@ -332,6 +332,7 @@ PATTERN_NOTES = {
     "climb_slow_r2":  "慎重に登る版(前向き)。登りはこれから",
     "climb_back_B":   "★後ろ向きに段0.21mを登って直立静止。段階B(押し外乱つき)95%。観測183次元・脚kp400。実機未検証・ハーネス必須",
     "climb_back_A":   "後ろ向き登り 段階A(外乱なし)100%。B の比較用",
+    "climb_back_S":   "★★後ろ向き登り 立位開始版(通常のスタンドロックから登る)。学習環境 立位開始 53%・参照開始 93%(2026-09-07 夕、CPU 追加学習 1.25M)。点検は通常の立位と比べる。実機未検証・ハーネス必須",
     "climb_r2":       "標準速の登り",
     "turn_wide_r2":   "ワイドスタンス旋回",
     "turn_fine_r2":   "細かい旋回",
@@ -362,15 +363,20 @@ def list_patterns():
 
 
 def make_obs_builder(pol, robot=None):
-    """方策の系統に合った観測の組み立て器。蒸留済み(615次元)は ObsBuilder、後ろ向き登り(183次元)は BackClimbObs"""
-    if getattr(pol, "family", "") == "back_climb":
+    """方策の系統に合った観測の組み立て器。蒸留済み(615次元)は ObsBuilder、後ろ向き登り(183次元)は BackClimbObs、
+    GPU(mjlab)学習の後ろ向き登り(160次元)は MjlabClimbObs(2026-09-07 夕)"""
+    fam = getattr(pol, "family", "")
+    if fam == "back_climb_mjlab":
+        from back_climb_mjlab import MjlabClimbObs
+        return MjlabClimbObs(pol, robot)
+    if fam == "back_climb":
         from back_climb import BackClimbObs
         return BackClimbObs(pol, robot)
     return ObsBuilder(pol)
 
 
 def _is_back_climb(pol):
-    return getattr(pol, "family", "") == "back_climb"
+    return str(getattr(pol, "family", "")).startswith("back_climb")
 
 
 def default_pattern(task, fallback="(skip)"):
@@ -1229,7 +1235,9 @@ class Engine:
         if not avail:
             self.log("★後ろ向き登りの方策(climb_back_*)が deploy に無い")
             return
-        name = "climb_back_B" if "climb_back_B" in avail else avail[0]
+        # ★立位開始で追加学習した climb_back_S(通常の立位から始められる)があればそれを優先(2026-09-07 夕)
+        name = ("climb_back_S" if "climb_back_S" in avail
+                else ("climb_back_B" if "climb_back_B" in avail else avail[0]))
         self.sel["climb"] = name
         items = []
         g = self._go_check()

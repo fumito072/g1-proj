@@ -90,9 +90,17 @@ class Policy:
                     self.net(torch.zeros(1, _nin))
         elif (d / "policy.npz").exists():
             # 後ろ向き段差登り(G1_後ろ向き段差登り_一式)。PyTorch 不要の numpy MLP。行動は 0.5 のローパス
-            from back_climb import NumpyPolicy
-            self.net = NumpyPolicy(d / "policy.npz")
-            self.family = "back_climb"
+            # ★GPU(mjlab)学習の方策は policy.npz の family="back_climb_mjlab"(160 次元、ローパス無し、2026-09-07 夕)
+            with np.load(d / "policy.npz", allow_pickle=True) as _pz:
+                _fam = str(_pz["family"]) if "family" in _pz.files else "back_climb"
+            if _fam == "back_climb_mjlab":
+                from back_climb_mjlab import NumpyMlp
+                self.net = NumpyMlp(d / "policy.npz")
+                self.family = "back_climb_mjlab"
+            else:
+                from back_climb import NumpyPolicy
+                self.net = NumpyPolicy(d / "policy.npz")
+                self.family = "back_climb"
         else:
             raise FileNotFoundError(f"{d} に policy.pt も policy.npz も無い")
         # ★zipは読み切って閉じる(遅延読み込みのまま制御ループへ渡さない)。
@@ -106,7 +114,7 @@ class Policy:
         self.n = len(self.ref_q)
         self.meta = json.loads((d / "meta.json").read_text())
         self.ref = z                               # ref_quat/ref_xy_abs/ref_z等
-        if self.family == "back_climb":
+        if self.family in ("back_climb", "back_climb_mjlab"):
             # 学習した区間の終端で凍結して保持する(それ以降は未知の観測。元の実験: 素通し 0/10、凍結 9/10)
             self.exec_hi = int(z["exec_hi"]) if "exec_hi" in z.files else self.n - 1
             self.n = min(self.n, self.exec_hi + 1)
@@ -128,6 +136,9 @@ class Policy:
         self._act_f = None
 
     def act(self, obs):
+        if self.family == "back_climb_mjlab":
+            # mjlab 学習の方策: 平均出力をそのまま(学習時にクリップもローパスも無い)。安全のため ±2.0 で頭打ち
+            return np.clip(self.net(obs), -2.0, 2.0).astype(np.float64)
         if self.family == "back_climb":
             a = np.clip(self.net.act(obs), -1.0, 1.0)
             from back_climb import ACT_BETA

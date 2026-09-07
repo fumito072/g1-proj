@@ -1,0 +1,15 @@
+{
+ "tag": "climb_back_S",
+ "family": "back_climb",
+ "motion": "back_climb",
+ "obs_dim": 183,
+ "act_dim": 29,
+ "trained_steps": 1253376,
+ "onnx": false,
+ "exec_hi": 260,
+ "stage": "S1",
+ "pass_rate": 53.333333333333336,
+ "source": "back_climb_retrain_20260907/policy_back_climb_S1.npz(段階 B から立位開始 60% で追加学習、2026-09-07)",
+ "obs_layout": "G1_後ろ向き段差登り_一式 rl/motion_env.py _observe(183次元)",
+ "notes": "通常の立位(実機のスタンドロック姿勢)から後ろ向きに段 0.21m を登って直立静止。脚 kp400/kd12。行動ローパス0.5、残差0.7rad、260 コマで凍結"
+}
