@@ -33,7 +33,8 @@ ExecStartPre=/bin/bash -c 'for i in $(seq 1 60); do ip -4 addr show eth0 2>/dev/
 ExecStartPre=/bin/bash -c 'pkill -f "python3 -u cockpit\\.py" 2>/dev/null; sleep 1; exit 0'
 # 時刻が合うまで待つ(Jetson は RTC 電池なしで起動直後は 1970 年。ログの日時と走行ログの名前が狂う)。最長 60 秒
 ExecStartPre=/bin/bash -c 'for i in $(seq 1 60); do [ "$(date +%%Y)" -ge 2024 ] && exit 0; sleep 1; done; echo "時刻が同期しない(1970のまま起動)"; exit 0'
-ExecStartPre=/bin/bash -c ': > /home/unitree/cl-workspace/cockpit_onboard.log'
+# 前回の起動ログを .prev に残してから空にする(初回起動が失敗した理由を再起動で消さない)
+ExecStartPre=/bin/bash -c 'cp -f /home/unitree/cl-workspace/cockpit_onboard.log /home/unitree/cl-workspace/cockpit_onboard.prev.log 2>/dev/null; : > /home/unitree/cl-workspace/cockpit_onboard.log'
 ExecStart=/usr/bin/python3 -u /home/unitree/cl-workspace/g1_cockpit/real/cockpit.py --port 8090 --host 0.0.0.0
 StandardOutput=append:/home/unitree/cl-workspace/cockpit_onboard.log
 StandardError=inherit
